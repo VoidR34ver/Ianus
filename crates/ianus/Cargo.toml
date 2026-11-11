@@ -1,0 +1,18 @@
+[package]
+name = "ianus"
+description = "Ianus runtime: Bevy plugins for the deterministic fixed tick, input and smooth rendering"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately the small Bevy sub-crates, not `bevy`: no renderer or window
+# in the dependency tree means fast builds and tests, and Bevy's rendering
+# churn cannot break this crate.
+[dependencies]
+ianus_sim.workspace = true
+ianus_objects.workspace = true
+bevy_app = "0.20"
+bevy_ecs = "0.20"
+bevy_input = { version = "0.20", features = ["keyboard"] }
+bevy_time = "0.20"
+bevy_transform = "0.20"

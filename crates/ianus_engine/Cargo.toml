@@ -1,0 +1,12 @@
+[package]
+name = "ianus_engine"
+description = "Ianus engine: a ready-to-run 2D window with the deterministic tick, replay and an editor-style GUI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ianus.workspace = true
+ianus_sim.workspace = true
+bevy = "0.20"
+bevy_egui = "0.43"

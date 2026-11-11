@@ -1,0 +1,8 @@
+[package]
+name = "ianus_sim"
+description = "Deterministic, float-free simulation core for Ianus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

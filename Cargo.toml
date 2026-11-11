@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/ianus_sim", "crates/ianus", "crates/ianus_engine", "crates/ianus_objects"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+ianus_sim = { path = "crates/ianus_sim" }
+ianus = { path = "crates/ianus" }
+ianus_objects = { path = "crates/ianus_objects" }
+
+# Own code at a light optimisation level, dependencies (Bevy) fully optimised.
+# Same idea Jackdaw uses: the first build is slow, every later one only
+# recompiles our crates.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
