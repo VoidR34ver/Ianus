@@ -1,6 +1,34 @@
 # HANDOFF: start here
 
-*Written 2026-11-11 for the next agent. Read `CLAUDE.md` (rules) and `PROGRESS.md` (state) too.*
+*Written 2026-11-11 for the next agent. Read `CLAUDE.md` (rules), `INFO.md` (overview) and `PROGRESS.md` (state) too. Updated later the same day: repo pushed to GitHub, outside review answered.*
+
+## What changed since the first version of this file
+
+- **Repo is on GitHub** (https://github.com/VoidR34ver/Ianus, `main`, one initial commit). The owner will also work from a Mac. Commit/push only on request.
+- **The outside review of `ENGINE-BRIEF-2.md` came back** and was checked against the code (below). Nothing from it has been implemented.
+- **Step 1 below (runtime tests) is still not written.** I had only read `room_tests.rs`, `collide.rs`, `objects.rs`, `room.rs`, `tick.rs` and `tests.rs` when work stopped. Useful facts from that read: `test_app(1.0)` gives one tick per `app.update()`; `loaded_app()` starts paused in Edit mode, so call `play(app.world_mut())` first; `DueObjects` after an update holds the list for tick `ticks(&app) - 1` (the tick counter advances after `Detect`); a single `ob_tick: n` object is due when `tick % n == phase`, phase dealt round-robin from 0; `Entity` defs default to a 75 hitbox, non-solid; Light/Wall/Environment default to `ob_tick` 0. New tests can go in `room_tests.rs` (or a new `#[cfg(test)] mod` in `lib.rs` next to `mod room_tests;`).
+
+## Outside review: what held up (checked 2026-11-11)
+
+**Confirmed in the code:**
+- World hash (`tick.rs:160`) is a wrapping sum of per-body FNV-1a with **no object ID**: swapping two bodies' states is invisible.
+- `rebuild_collision` triggers on `Changed<SimBody>` (`collide.rs:178`).
+- `Touching` is sorted by `Entity::index()` (`collide.rs:221`), which depends on spawn/despawn history.
+- `footprint_of` (`collide.rs:49`) uses `/ 100`, so hundredths round and negative offsets truncate toward zero. 75 is exact (1536); most values are not (1 hundredth = 40.96 subunits).
+- No ambiguity detection is configured. `HashSet` is used in `play.rs` for membership only; `HashMap` in `validate.rs` (not sim state).
+
+**Overreach or wrong (my assessment):**
+- "Use `div_euclid` for offsets": truncation keeps mirrored offsets mirrored; flooring would not. Pick exact units instead (1/64 tile) if this matters.
+- "Tunnelling cannot happen": assumes a minimum hitbox size; whether the validator enforces one is **unverified**.
+- `Changed<T>` risk is mainly a *missed* rebuild (collider removed/despawned during play). Add a test.
+- "Detect last makes Touching stale": only for logic running after movement in the same tick.
+- Experiment 1's rule "any mismatch means leave the ECS" is too strong.
+- Full state-out-of-Bevy (Q14/Q15) resembles the rejected "sim layer only" pivot and conflicts with the Jackdaw route. A middle path: move only the logic into `ianus_sim`, keep state in the ECS.
+- Guesses to treat as guesses: "live coding with rewind that no other engine has", the ECS cost numbers.
+
+**Cheap fixes that do not depend on the owner's big decisions:** add the object's ID to the per-body hash (this changes golden hashes; update them deliberately and say why); clippy lints banning floats and `HashMap`/`HashSet` in `ianus_sim`; fix the "rounds down" doc comment; run the tests on the Mac (cross-OS check); consider CI (Linux/macOS/Windows).
+
+**Reviewer's three experiments** (determinism harness, scripting-loop spike, many-mover broadphase) are good designs; none is run yet.
 
 ## Where we stopped
 
@@ -33,7 +61,8 @@ Ask first. If yes: `tools/quiet-run.ps1 -Exe target\debug\examples\room.exe` wit
 ## Decisions that are the owner's (ask, do not decide)
 
 1. **Scope:** 2D simulation only, or also platformers/Metroidvania or 3D visuals? An outside reviewer proposed both without evidence; Godot and GameMaker already serve platformers well.
-2. **Whether to send `ENGINE-BRIEF-2.md` to another AI**, and which. Its answer should be treated as a hypothesis to test, not as truth.
+2. ~~Whether to send `ENGINE-BRIEF-2.md`~~ Done; it was answered and checked (see above). Whether to send it to a *second* AI is open.
+2b. **Architecture forks raised by the review:** where sim state lives (ECS vs separate store, or the middle path); phase order (current vs Commit/Move/Detect/Logic with queued commands); hitbox units (hundredths vs 1/64 tile); `Kind` enum at runtime vs composed presets, plus layers/masks; whether Jackdaw waits for a scripting spike. Give options and a recommendation, then let her choose.
 3. **Editor route** (decided: Jackdaw distribution, renovated gradually) is untested; Jackdaw was never built. Revisit only after her call.
 4. **What "success" means** at 6 and 18 months, and her hours per week. (She said "Claude codes while I do my Matura", so review time is the bottleneck, not typing.)
 

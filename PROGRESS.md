@@ -6,7 +6,9 @@
 
 - **161 tests pass** (`ianus_sim` 69, `ianus` 43, `ianus_objects` 29, `ianus_engine` 20). Clippy: zero warnings. All examples compile. (VERIFIED at the end of the last session.)
 - **No window has been opened since the collision/scheduler rewrite.** Recent GUI changes have never been seen on screen.
-- Not a git repo. Rust 1.99.1, Bevy 0.20.1, Windows 11 (Ryzen 5 7600, RTX 4080 SUPER).
+- **Git repo, pushed to https://github.com/VoidR34ver/Ianus (`main`, one commit, 46 files; `target/` and `spikes/` ignored).** VERIFIED: push succeeded and the remote was empty beforehand. The test suite has **not** been run on the Mac or from a fresh clone, so "builds from a clean clone" is UNVERIFIED. Line endings: LF in the repo (Windows `autocrlf` on).
+- Rust 1.99.1, Bevy 0.20.1, Windows 11 (Ryzen 5 7600, RTX 4080 SUPER). Owner also uses a Mac.
+- The test counts above are from before the repo move; no code changed since (only docs: `INFO.md` added, `CLAUDE.md`, `HANDOFF.md`, `PROGRESS.md` updated).
 
 ## Done and verified
 
@@ -75,4 +77,10 @@ Per-entity speed (ignored; global tuning applies); environment speed percent (mu
 
 ## Documents
 
-`ianus-plan.md` (early research; the "sim layer only" pivot in it was rejected by the owner), `ENGINE-HANDOVER.md` (v1 brief for an outside reviewer), `ENGINE-BRIEF-2.md` (v2, sharper). **An outside AI reviewed v1; its answer rewrote the spec instead of answering and contained several mistakes** (see v2 section 9). v2 has not been sent or answered yet.
+`INFO.md` (overview and standing, new), `HANDOFF.md`, `CLAUDE.md`, `ianus-plan.md` (early research; the "sim layer only" pivot in it was rejected by the owner), `ENGINE-HANDOVER.md` (v1 brief for an outside reviewer), `ENGINE-BRIEF-2.md` (v2, sharper). **An outside AI reviewed v1; its answer rewrote the spec instead of answering and contained several mistakes** (see v2 section 9). **v2 was answered on 2026-11-11** by an outside AI; its code-level claims were checked against the source (details in `HANDOFF.md`): the hash-without-ID, `Changed<SimBody>` trigger, entity-index sorting and hitbox rounding claims are VERIFIED in code; several recommendations are overreach. Nothing from the review is implemented yet.
+
+## Open items added 2026-11-11
+
+- **Runtime tests from HANDOFF step 1: NOT WRITTEN.** `Collider`, `Touching`, `DueObjects` and phase order remain WRITTEN-only.
+- **Known weaknesses confirmed by the review (not fixed):** hash has no object ID; `Touching` order depends on spawn history; hitbox hundredths round; no ambiguity detection on the tick schedule; possible missed rebuild when a collider is removed mid-play (UNVERIFIED, needs a test).
+- **Cross-OS determinism:** still UNVERIFIED until `cargo test --workspace --lib` is run on the Mac.
