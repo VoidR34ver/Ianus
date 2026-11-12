@@ -119,7 +119,12 @@ pub(crate) fn gui_system(
     let bottom = egui::Panel::bottom("simulation")
         .resizable(true)
         .default_size(150.0)
-        .show(&mut root, |ui| simulation_panel(ui, &data))
+        .show(&mut root, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("simulation_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| simulation_panel(ui, &data))
+        })
         .response
         .rect
         .height();
@@ -145,16 +150,21 @@ pub(crate) fn gui_system(
         .resizable(true)
         .default_size(260.0)
         .show(&mut root, |ui| {
-            inspector_panel(
-                ui,
-                &data,
-                &mut selection,
-                &mut bodies,
-                &mut placed,
-                &mut agents,
-                &object_tags,
-                &mut nav_tools,
-            )
+            egui::ScrollArea::vertical()
+                .id_salt("inspector_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    inspector_panel(
+                        ui,
+                        &data,
+                        &mut selection,
+                        &mut bodies,
+                        &mut placed,
+                        &mut agents,
+                        &object_tags,
+                        &mut nav_tools,
+                    )
+                })
         })
         .response
         .rect
@@ -639,6 +649,7 @@ fn simulation_panel(ui: &mut egui::Ui, data: &GuiData) {
         ui.label("Messages");
         egui::ScrollArea::vertical()
             .id_salt("messages")
+            .max_height(90.0)
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 let mut any = false;
