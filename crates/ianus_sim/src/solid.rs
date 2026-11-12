@@ -19,7 +19,7 @@
 //! Movement is resolved one axis at a time, which is what makes bodies *slide*
 //! along a wall instead of sticking when you push diagonally into it.
 
-use crate::{Aabb, Body, BroadPhase, MoveInput, SUBUNITS_PER_TILE, accelerate};
+use crate::{Aabb, Body, BroadPhase, MAX_SPEED, MoveInput, SUBUNITS_PER_TILE, accelerate_max};
 
 /// Half the width of the default body, in subunits (0.375 tiles: a 0.75-tile
 /// square).
@@ -168,7 +168,7 @@ impl SolidGrid {
 /// The tile column or row containing a coordinate. Tile `t` covers
 /// `[t * TILE - HALF_TILE, t * TILE + HALF_TILE)`.
 #[inline(always)]
-fn tile_of(coord: i32) -> i32 {
+pub fn tile_of(coord: i32) -> i32 {
     (i64::from(coord) + i64::from(HALF_TILE)).div_euclid(i64::from(SUBUNITS_PER_TILE)) as i32
 }
 
@@ -268,7 +268,18 @@ impl Solids {
 /// and behaves exactly as before. A body with no area has nothing to collide
 /// with and moves freely.
 pub fn step_body_solid(body: &mut Body, input: MoveInput, solids: &Solids, fp: &Footprint) {
-    accelerate(body, input);
+    step_body_solid_max(body, input, solids, fp, MAX_SPEED);
+}
+
+/// [`step_body_solid`] with a chosen top speed (subunits per tick on one axis).
+pub fn step_body_solid_max(
+    body: &mut Body,
+    input: MoveInput,
+    solids: &Solids,
+    fp: &Footprint,
+    max_speed: i32,
+) {
+    accelerate_max(body, input, max_speed);
 
     let stuck = solids.overlaps(&fp.aabb_at(body.pos.x, body.pos.y));
     let piece = fp.half_x.min(fp.half_y).saturating_mul(2);
