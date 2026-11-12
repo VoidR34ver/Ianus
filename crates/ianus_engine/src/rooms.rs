@@ -169,6 +169,42 @@ pub(crate) fn load_initial_room(world: &mut World) {
     }
 }
 
+impl RoomFile {
+    pub(crate) fn path(&self) -> &Path {
+        self.watch.path()
+    }
+}
+
+/// Folder the Rooms tab and the Resources tree list.
+pub(crate) const ROOMS_DIR: &str = "rooms";
+
+/// `.room` files in the rooms folder, sorted by name.
+pub(crate) fn list_rooms() -> Vec<std::path::PathBuf> {
+    let mut files: Vec<_> = std::fs::read_dir(ROOMS_DIR)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "room"))
+        .collect();
+    files.sort();
+    files
+}
+
+/// Switch to another room file: watch it from now on and load it. A running
+/// game is stopped first, like Reload.
+pub(crate) fn open_room(world: &mut World, path: &Path) {
+    if *world.resource::<PlayMode>() == PlayMode::Playing {
+        stop(world);
+    }
+    world.insert_resource(RoomFile {
+        watch: FileWatch::new(path),
+        dirty: false,
+        told: false,
+    });
+    load_and_report(world, path);
+}
+
 /// Load the room file again now (the toolbar's "Reload room").
 pub(crate) fn reload_now(world: &mut World) -> String {
     let Some(path) = world
