@@ -101,11 +101,18 @@ pub(crate) fn apply_actions(world: &mut World) {
                 world.resource_mut::<EngineStatus>().say(message);
             }
             Action::Restart => {
+                let recording = matches!(*world.resource::<ReplayMode>(), ReplayMode::Recording(_));
                 let message = match restart_world(world) {
                     Ok(()) => {
                         world.insert_resource(Tick(0));
+                        // Same start as loading a room: tick 0, seed 0.
+                        world.insert_resource(SimRng::default());
                         world.insert_resource(ReplayMode::Off);
-                        "world restarted".to_string()
+                        if recording {
+                            "world restarted (the recording in progress was discarded)".to_string()
+                        } else {
+                            "world restarted".to_string()
+                        }
                     }
                     Err(e) => format!("restart hook failed: {e}"),
                 };

@@ -1,8 +1,20 @@
 # PROGRESS: what exists and how sure we are
 
-*Last updated 2026-11-11. Labels: **VERIFIED** = run or measured; **WRITTEN** = code exists, no test exercises it end to end; **OPEN** = unknown or undecided.*
+*Last updated 2026-11-12. Labels: **VERIFIED** = run or measured; **WRITTEN** = code exists, no test exercises it end to end; **OPEN** = unknown or undecided.*
 
 ## Snapshot
+
+- **2026-11-12 logic-skip review: found, fixed, tested (branch `claude/logic-skips-investigation-7vqgu5`, not merged to `main`).** Each fix has a test that was made to fail by breaking the fix once (10 of 10 went red). Golden hashes did not change. Counts and clippy for this branch are in the line below once the final run is recorded; the 161 figure further down is the old one.
+  - Despawned or collider-stripped walls kept blocking, and dead entities stayed in `Touching` and `DueObjects` (`Changed<SimBody>` cannot see removals; now also watches `RemovedComponents<Collider>`, and due objects are filtered for liveness).
+  - Non-player movers were drawn at their old place (`PrevPos` only updated for the player; now set for every changed body at the start of a tick).
+  - `Touching` was one tick late for anything that moved during `Sim` (collision structures are now also refreshed at the start of `Detect`; the cost is a second emptiness check per tick, and a second rebuild on ticks where something moved).
+  - A solid player blocked itself through a ghost box from `SolidMap::from_room`.
+  - A key tapped while paused fired on resume (taps are dropped while paused, unless a step is requested).
+  - Tiny bodies could tunnel through thin solids (movement is now cut into pieces no longer than the body is wide; normal-size bodies are one piece, so behaviour is unchanged). A zero-area body still ignores everything; the validator now says so for entities.
+  - `Scheduler::due` reported the full interval as elapsed on an object's first update; it now reports `tick + 1`, so elapsed ticks add up to ticks run.
+  - Restart now also resets the RNG and says when it discards a recording; inspector moves in edit mode now update the object's `home` (they were reverted by Restart/F7/F6).
+  - Validator: a light with radius 0 and intensity over 100 now gets both warnings; `ob_tick * ob_tick_scale` past the cap now warns.
+- **Still open from that review (not fixed):** recordings silently stop growing at 1,000,000 ticks and would replay as DIVERGED; `Touching` order still depends on spawn history; the hash still has no object ID; the world hash only covers `SimBody`s; a body that starts inside a connected mass of solids can leave the room (documented, only whole-tile solids are validated). Window behaviour of the engine-crate changes (inspector `home`, Restart message) is WRITTEN only: no window has been opened.
 
 - **161 tests pass** (`ianus_sim` 69, `ianus` 43, `ianus_objects` 29, `ianus_engine` 20). Clippy: zero warnings. All examples compile. (VERIFIED at the end of the last session.)
 - **No window has been opened since the collision/scheduler rewrite.** Recent GUI changes have never been seen on screen.
@@ -81,6 +93,6 @@ Per-entity speed (ignored; global tuning applies); environment speed percent (mu
 
 ## Open items added 2026-11-11
 
-- **Runtime tests from HANDOFF step 1: NOT WRITTEN.** `Collider`, `Touching`, `DueObjects` and phase order remain WRITTEN-only.
-- **Known weaknesses confirmed by the review (not fixed):** hash has no object ID; `Touching` order depends on spawn history; hitbox hundredths round; no ambiguity detection on the tick schedule; possible missed rebuild when a collider is removed mid-play (UNVERIFIED, needs a test).
+- **Runtime tests from HANDOFF step 1: PARTLY WRITTEN.** The 2026-11-12 tests cover removal/despawn, `Touching` timing and `DueObjects` liveness. Still missing: per-object collision toggle, `WorldRules.collision = false`, `ob_tick` rates and scale through the real schedule, edit-mode drag then first Play tick, replay in the cellar with the new phases.
+- **Known weaknesses confirmed by the review (not fixed):** hash has no object ID; `Touching` order depends on spawn history; hitbox hundredths round; no ambiguity detection on the tick schedule; possible missed rebuild when a collider is removed mid-play (was real; FIXED 2026-11-12, tested).
 - **Cross-OS determinism:** still UNVERIFIED until `cargo test --workspace --lib` is run on the Mac.

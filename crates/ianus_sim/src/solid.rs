@@ -260,38 +260,69 @@ impl Solids {
 /// solid (a mistake in the room) moves freely until it is out, rather than
 /// being thrown back across the map.
 ///
-/// A body moves less than a tile per tick, so it can never skip over a wall.
+/// A tick's movement is cut into pieces no longer than the body is wide, and
+/// each piece is checked. With pieces that short the body's box before and
+/// after a piece always touch or overlap, so nothing can be jumped over, even
+/// a thin wall in front of a tiny body. A body of normal size (a third of a
+/// tile or more) moves less than its own width per tick, so it is one piece
+/// and behaves exactly as before. A body with no area has nothing to collide
+/// with and moves freely.
 pub fn step_body_solid(body: &mut Body, input: MoveInput, solids: &Solids, fp: &Footprint) {
     accelerate(body, input);
 
     let stuck = solids.overlaps(&fp.aabb_at(body.pos.x, body.pos.y));
+    let piece = fp.half_x.min(fp.half_y).saturating_mul(2);
 
     // X first, then Y, each against the position the other left behind.
-    let nx = body.pos.x.saturating_add(body.vel.x);
-    let probe = fp.aabb_at(nx, body.pos.y);
-    if stuck || !solids.overlaps(&probe) {
-        body.pos.x = nx;
-    } else if let Some(edge) = solids.edge_x(&probe, body.vel.x > 0) {
-        // Sit flush against the nearest thing in the way.
-        body.pos.x = if body.vel.x > 0 {
-            edge - fp.half_x - fp.offset_x
-        } else {
-            edge + fp.half_x - fp.offset_x
-        };
-        body.vel.x = 0;
+    if stuck || piece <= 0 {
+        body.pos.x = body.pos.x.saturating_add(body.vel.x);
+    } else {
+        let mut left = body.vel.x;
+        while left != 0 {
+            let step = left.clamp(-piece, piece);
+            let nx = body.pos.x.saturating_add(step);
+            let probe = fp.aabb_at(nx, body.pos.y);
+            if !solids.overlaps(&probe) {
+                body.pos.x = nx;
+                left -= step;
+            } else {
+                if let Some(edge) = solids.edge_x(&probe, step > 0) {
+                    // Sit flush against the nearest thing in the way.
+                    body.pos.x = if step > 0 {
+                        edge - fp.half_x - fp.offset_x
+                    } else {
+                        edge + fp.half_x - fp.offset_x
+                    };
+                    body.vel.x = 0;
+                }
+                break;
+            }
+        }
     }
 
-    let ny = body.pos.y.saturating_add(body.vel.y);
-    let probe = fp.aabb_at(body.pos.x, ny);
-    if stuck || !solids.overlaps(&probe) {
-        body.pos.y = ny;
-    } else if let Some(edge) = solids.edge_y(&probe, body.vel.y > 0) {
-        body.pos.y = if body.vel.y > 0 {
-            edge - fp.half_y - fp.offset_y
-        } else {
-            edge + fp.half_y - fp.offset_y
-        };
-        body.vel.y = 0;
+    if stuck || piece <= 0 {
+        body.pos.y = body.pos.y.saturating_add(body.vel.y);
+    } else {
+        let mut left = body.vel.y;
+        while left != 0 {
+            let step = left.clamp(-piece, piece);
+            let ny = body.pos.y.saturating_add(step);
+            let probe = fp.aabb_at(body.pos.x, ny);
+            if !solids.overlaps(&probe) {
+                body.pos.y = ny;
+                left -= step;
+            } else {
+                if let Some(edge) = solids.edge_y(&probe, step > 0) {
+                    body.pos.y = if step > 0 {
+                        edge - fp.half_y - fp.offset_y
+                    } else {
+                        edge + fp.half_y - fp.offset_y
+                    };
+                    body.vel.y = 0;
+                }
+                break;
+            }
+        }
     }
 }
 

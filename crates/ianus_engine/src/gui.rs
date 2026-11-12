@@ -84,7 +84,7 @@ pub(crate) fn gui_system(
     mut selection: ResMut<Selection>,
     mut actions: ResMut<Actions>,
     mut bodies: BodyQuery,
-    placed: Query<&PlacedObject>,
+    mut placed: Query<&mut PlacedObject>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
     let scale_factor = window.scale_factor();
@@ -122,7 +122,14 @@ pub(crate) fn gui_system(
         .resizable(true)
         .default_size(210.0)
         .show(&mut root, |ui| {
-            scene_panel(ui, &data, &mut selection, &bodies, &placed, &mut actions)
+            scene_panel(
+                ui,
+                &data,
+                &mut selection,
+                &bodies,
+                &placed.as_readonly(),
+                &mut actions,
+            )
         })
         .response
         .rect
@@ -132,7 +139,7 @@ pub(crate) fn gui_system(
         .resizable(true)
         .default_size(260.0)
         .show(&mut root, |ui| {
-            inspector_panel(ui, &data, &mut selection, &mut bodies, &placed)
+            inspector_panel(ui, &data, &mut selection, &mut bodies, &mut placed)
         })
         .response
         .rect
@@ -392,7 +399,7 @@ fn inspector_panel(
     data: &GuiData,
     selection: &mut Selection,
     bodies: &mut BodyQuery,
-    placed: &Query<&PlacedObject>,
+    placed: &mut Query<&mut PlacedObject>,
 ) {
     ui.heading("Inspector");
     ui.separator();
@@ -453,6 +460,14 @@ fn inspector_panel(
                     body.0.pos.y = (y * sub).round() as i32;
                     body.0.vel = Vec2i::ZERO;
                     prev.0 = body.0.pos;
+                    // In edit mode this is moving the object's starting point,
+                    // so Restart and recording must not put it back. While
+                    // playing it is a temporary nudge that Stop undoes.
+                    if *data.play_mode == PlayMode::Editing
+                        && let Ok(mut object) = placed.get_mut(entity)
+                    {
+                        object.home = body.0.pos;
+                    }
                 }
                 if ui
                     .button("Stop")

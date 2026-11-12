@@ -493,7 +493,8 @@ fn a_level_scale_that_pushes_ob_tick_past_the_limit_is_a_warning() {
     r.world.ob_tick_scale = 1000;
     let m = messages(&r);
     assert!(
-        m.iter().any(|s| s.contains("'Slow'") && s.contains("ob_tick_scale")),
+        m.iter()
+            .any(|s| s.contains("'Slow'") && s.contains("ob_tick_scale")),
         "{m:?}"
     );
 }

@@ -2,6 +2,10 @@
 
 *Written 2026-11-11 for the next agent. Read `CLAUDE.md` (rules), `INFO.md` (overview) and `PROGRESS.md` (state) too. Updated later the same day: repo pushed to GitHub, outside review answered.*
 
+## 2026-11-12: logic-skip review (read this first)
+
+Branch `claude/logic-skips-investigation-7vqgu5` holds a review that found nine logic skips, fixes for them and tests (list in `PROGRESS.md` Snapshot). It is **not merged**; the owner decides. Step 1 below is now partly done (see `PROGRESS.md` open items). The Rust toolchain on a fresh machine must be 1.99.1 (`cargo` 1.97 fails on Bevy 0.20 dependencies). Open questions for the owner: minimum hitbox size (validator only warns today); whether a tap during pause should be remembered for stepping; replay length cap behaviour.
+
 ## What changed since the first version of this file
 
 - **Repo is on GitHub** (https://github.com/VoidR34ver/Ianus, `main`, one initial commit). The owner will also work from a Mac. Commit/push only on request.

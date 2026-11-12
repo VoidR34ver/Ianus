@@ -25,7 +25,7 @@ Each tick runs `Input → World → Objects → Sim → Detect`. Objects are "th
 
 ## Where it stands (2026-11-11)
 
-**Works and verified:** deterministic movement with a pinned golden hash; replay record/playback; exact Play/Stop restore; the player stops at walls and the room edge; room loading with refusal on errors; the spatial hash (matches brute force on 160 random worlds); the tick scheduler; benchmarks (hash rebuild for 10,000 boxes costs 0.15 ms). 161 tests pass and clippy is clean (as of the last full run, on Windows).
+**Works and verified:** deterministic movement with a pinned golden hash; replay record/playback; exact Play/Stop restore; the player stops at walls and the room edge; room loading with refusal on errors; the spatial hash (matches brute force on 160 random worlds); the tick scheduler; benchmarks (hash rebuild for 10,000 boxes costs 0.15 ms). 161 tests passed and clippy was clean on Windows before the 2026-11-12 review; the review branch `claude/logic-skips-investigation-7vqgu5` adds fixes and tests (see `PROGRESS.md`).
 
 **Written but not tested end to end:** per-object colliders, `Touching`, `DueObjects`, the phase chain. Nothing consumes `DueObjects` yet.
 
@@ -58,7 +58,7 @@ Each tick runs `Input → World → Objects → Sim → Detect`. Objects are "th
 
 ## Next steps (recommended)
 
-1. Write the headless runtime tests listed in `HANDOFF.md` step 1 (nothing written yet), then sabotage each to prove it can fail.
+1. Finish the headless runtime tests in `HANDOFF.md` step 1 (partly written on the review branch), then sabotage each to prove it can fail.
 2. Run `cargo test --workspace --lib` on the Mac and compare golden hashes.
 3. Small fixes that do not depend on the big decisions: put an object ID into the per-body hash, add lints banning floats and `HashMap` in `ianus_sim`, fix the "rounds down" doc comment.
 4. Then pick: many movers plus stress test (recommended), or the scripting-loop spike.

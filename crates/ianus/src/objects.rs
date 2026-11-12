@@ -64,13 +64,18 @@ pub(crate) fn plugin(app: &mut App) {
 }
 
 fn collect_due(
+    alive: Query<()>,
     tick: Res<Tick>,
     schedule: Option<Res<ObjectSchedule>>,
     mut due: ResMut<DueObjects>,
 ) {
     due.0.clear();
     let Some(schedule) = schedule else { return };
-    schedule.sched.due(tick.0, |id, every| {
-        due.0.push((schedule.entities[id as usize], every));
+    schedule.sched.due(tick.0, |id, elapsed| {
+        let entity = schedule.entities[id as usize];
+        // Despawned during play: still filed, but not handed out.
+        if alive.contains(entity) {
+            due.0.push((entity, elapsed));
+        }
     });
 }

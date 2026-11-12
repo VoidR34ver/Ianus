@@ -625,7 +625,10 @@ fn something_other_than_the_player_moving_is_touched_and_drawn_right_away() {
         app.update();
     }
     let crate_entity = entity_at(&mut app, "Crate", (5, 3));
-    assert_eq!(body_named(&mut app, "Crate").pos, Vec2i::new(2 * TILE, 2 * TILE));
+    assert_eq!(
+        body_named(&mut app, "Crate").pos,
+        Vec2i::new(2 * TILE, 2 * TILE)
+    );
     assert!(
         app.world().resource::<Touching>().0.contains(&crate_entity),
         "Touching must see a move made earlier in the same tick"

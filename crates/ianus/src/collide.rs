@@ -114,6 +114,18 @@ impl SolidMap {
             room.height,
             room.placed.iter().filter_map(|p| {
                 let def = room.find_object(&p.object)?;
+                // The controlled entity is never part of the solid map (the
+                // per-tick rebuild leaves it out too); otherwise its own start
+                // box would linger as a ghost wall.
+                if matches!(
+                    def.kind,
+                    ianus_objects::Kind::Entity {
+                        controlled: true,
+                        ..
+                    }
+                ) {
+                    return None;
+                }
                 let c = Collider::for_def(def, room.world.collision)?;
                 Some((c, Vec2i::new(p.x.saturating_mul(t), p.y.saturating_mul(t))))
             }),
@@ -171,6 +183,16 @@ pub(crate) fn plugin(app: &mut App) {
         // Rebuilt in the World phase, before anything moves, so a wall that was
         // dragged in the editor is already in place on the first tick of Play.
         .add_systems(FixedUpdate, rebuild_collision.in_set(IanusSet::World))
+        // Again at the start of Detect, so anything that moved or vanished
+        // during Sim is seen by this tick's Touching, not the next one's.
+        // Each registration tracks its own change ticks, so neither misses
+        // anything; the second is a cheap emptiness check on quiet ticks.
+        .add_systems(
+            FixedUpdate,
+            rebuild_collision
+                .in_set(IanusSet::Detect)
+                .before(detect_touching),
+        )
         .add_systems(FixedUpdate, detect_touching.in_set(IanusSet::Detect));
 }
 
@@ -182,12 +204,17 @@ type MovedColliders<'w, 's> =
 /// did, so this is a cheap emptiness check.
 fn rebuild_collision(
     moved: MovedColliders,
+    mut removed: RemovedComponents<Collider>,
     colliders: Query<(Entity, &Collider, &SimBody), Without<Controlled>>,
     room: Option<Res<crate::room::CurrentRoom>>,
     mut index: Option<ResMut<ColliderIndex>>,
     mut solids: Option<ResMut<SolidMap>>,
 ) {
-    if moved.is_empty() {
+    // A collider that was removed, or whose entity was despawned, changes
+    // nothing that `Changed` can see, so ask for those separately. (Always
+    // drain the reader so old removals do not trigger a rebuild later.)
+    let vanished = removed.read().count() > 0;
+    if moved.is_empty() && !vanished {
         return;
     }
     let (Some(room), Some(index), Some(solids)) =

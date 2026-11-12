@@ -85,14 +85,6 @@ fn check_definition(def: &ObjectDef, problems: &mut Vec<Problem>) {
         ));
     }
     match &def.kind {
-        Kind::Light { radius_tiles: 0, .. } => problems.push(Problem::warning(format!(
-            "Light '{name}' has radius 0, so it lights nothing. Try a radius of 3 or more."
-        ))),
-        Kind::Light { intensity_percent, .. } if *intensity_percent > 100 => {
-            problems.push(Problem::warning(format!(
-                "Light '{name}' has intensity {intensity_percent}%. The scale is 0 to 100; anything higher is treated as 100."
-            )));
-        }
         Kind::SubstanceSource { rate_per_tick: 0, .. } => problems.push(Problem::warning(format!(
             "Substance source '{name}' adds 0 per tick, so it never produces anything. Try a rate of 1."
         ))),
@@ -109,6 +101,24 @@ fn check_definition(def: &ObjectDef, problems: &mut Vec<Problem>) {
         _ => {}
     }
 
+    if let Kind::Light {
+        radius_tiles,
+        intensity_percent,
+        ..
+    } = &def.kind
+    {
+        if *radius_tiles == 0 {
+            problems.push(Problem::warning(format!(
+                "Light '{name}' has radius 0, so it lights nothing. Try a radius of 3 or more."
+            )));
+        }
+        if *intensity_percent > 100 {
+            problems.push(Problem::warning(format!(
+                "Light '{name}' has intensity {intensity_percent}%. The scale is 0 to 100; anything higher is treated as 100."
+            )));
+        }
+    }
+
     // Hitbox and collision switches.
     if def.solid && !def.collision {
         problems.push(Problem::warning(format!(
@@ -117,8 +127,13 @@ fn check_definition(def: &ObjectDef, problems: &mut Vec<Problem>) {
         )));
     }
     if def.collision && (def.hitbox.width == 0 || def.hitbox.height == 0) {
+        let walls = if matches!(def.kind, Kind::Entity { .. }) {
+            " An entity with no area will also walk through walls and out of the room."
+        } else {
+            ""
+        };
         problems.push(Problem::warning(format!(
-            "'{name}' has a hitbox of {}x{}, so nothing can ever touch it. \
+            "'{name}' has a hitbox of {}x{}, so nothing can ever touch it.{walls} \
              Give it a size (100 is one tile) or turn its collision off.",
             def.hitbox.width, def.hitbox.height
         )));
@@ -189,6 +204,21 @@ impl Room {
             problems.push(Problem::error(format!(
                 "There are {count} objects called '{name}'. Names must be unique so placing '{name}' is unambiguous; rename one."
             )));
+        }
+
+        // The level's scale multiplies every interval; the result is capped.
+        if self.world.ob_tick_scale > 1 {
+            for def in &self.objects {
+                if def.ob_tick <= MAX_OB_TICK
+                    && def.ob_tick.saturating_mul(self.world.ob_tick_scale) > MAX_OB_TICK
+                {
+                    problems.push(Problem::warning(format!(
+                        "'{}' has ob_tick {}, and the world's ob_tick_scale of {} stretches that past \
+                         {MAX_OB_TICK} ticks (an hour). It is treated as {MAX_OB_TICK}.",
+                        def.name, def.ob_tick, self.world.ob_tick_scale
+                    )));
+                }
+            }
         }
 
         // A switch that toggles something that does not exist does nothing.
