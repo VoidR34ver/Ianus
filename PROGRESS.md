@@ -40,6 +40,10 @@
 
 ## Done and verified
 
+**`ianus_cli` (command-line tool for AI agents and CI, added 2026-11-12, uncommitted)**
+- `validate`, `run` (scripted input, `--record`, `--expect-hash`) and `replay`, all headless, all with `--json`. 12 tests pass; clippy clean for this crate; one test was deliberately broken once and went red. Exit codes: 0 ok, 1 check failed, 2 usage/file error.
+- Hash values printed by `run` come from this Linux container; cross-OS equality is unverified (same caveat as the golden hashes). No golden pinned in the CLI tests.
+
 **`ianus_sim` (deterministic core)**
 - Integer movement: top speed 341 subunits/tick (~5 tiles/s at 60 Hz), accel 60, friction 40, reversing = accel+friction, diagonals ×181/256, saturating at edges. Golden replay hash pinned.
 - `Rng`: xoshiro256** via SplitMix64, `fork`, unbiased `below`. First outputs cross-checked against an independent Python implementation.
