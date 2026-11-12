@@ -313,7 +313,7 @@ fn toolbar(ui: &mut egui::Ui, data: &GuiData, actions: &mut Actions, editor: &mu
             actions.push(Action::PlaySavedReplay);
         }
         if ui
-            .selectable_label(editor.open, "Code")
+            .selectable_label(editor.open, "Resources")
             .on_hover_text("Open the code editor window (scripts/ folder)")
             .clicked()
         {

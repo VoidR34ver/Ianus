@@ -247,7 +247,7 @@ impl Plugin for EnginePlugin {
             .init_resource::<Actions>()
             .init_resource::<Selection>()
             .init_resource::<navtools::NavTools>()
-            .init_resource::<code_editor::CodeEditor>()
+            .insert_resource(code_editor::CodeEditor::from_env())
             // Typing in the code editor must not drive the player or trigger F-keys.
             .insert_resource(bevy_egui::EguiGlobalSettings {
                 enable_absorb_bevy_input_system: true,
