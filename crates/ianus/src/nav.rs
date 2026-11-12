@@ -30,7 +30,7 @@
 
 use bevy_app::{App, FixedUpdate};
 use bevy_ecs::prelude::*;
-use ianus_objects::{AgentTarget, Kind, Room};
+use ianus_objects::{AgentTarget, Kind, NavPaint, Room};
 use ianus_sim::{
     Body, Footprint, GROUND_COST, MoveInput, NavCosts, NavFilter, NavGrid, PathFinder, PathOutcome,
     SUBUNITS_PER_TILE, SearchRange, Solids, Vec2i, raw_path, segment_clear, smooth_path,
@@ -189,6 +189,11 @@ pub struct NavPath {
 }
 
 impl NavPath {
+    /// The tile the route was planned to, for showing it.
+    pub fn goal_tile(&self) -> (i32, i32) {
+        self.goal_tile
+    }
+
     /// The waypoints still ahead, for drawing the route.
     pub fn waypoints_ahead(&self) -> &[Vec2i] {
         &self.waypoints[self.next.min(self.waypoints.len())..]
@@ -354,6 +359,115 @@ pub(crate) fn plugin(app: &mut App) {
                     .after(step_controlled),
             ),
         );
+}
+
+/// What to do to the nav tags painted on one tile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaintOp {
+    /// Put this tag on the tile (nothing happens if it is already there).
+    Add(String),
+    /// Take this tag off the tile.
+    Remove(String),
+    /// Take every painted tag off the tile. Tags that objects standing there
+    /// bring with them are not touched.
+    Clear,
+}
+
+/// Why a paint operation was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaintError {
+    /// No room is loaded.
+    NoRoom,
+    /// The tile is outside the room.
+    OutsideRoom,
+    /// The room does not declare this tag.
+    UnknownTag(String),
+}
+
+impl core::fmt::Display for PaintError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            PaintError::NoRoom => write!(f, "no room is loaded"),
+            PaintError::OutsideRoom => write!(f, "that tile is outside the room"),
+            PaintError::UnknownTag(t) => write!(f, "the room does not declare the nav tag '{t}'"),
+        }
+    }
+}
+
+impl core::error::Error for PaintError {}
+
+/// Paint (or unpaint) nav tags on one tile of the loaded room, and bring the
+/// nav map up to date at once, so every agent replans on its next turn.
+/// Returns whether anything changed.
+///
+/// This edits the loaded room, not the room file: reloading the file puts the
+/// painting back as it was written there.
+pub fn paint_nav_tile(world: &mut World, x: i32, y: i32, op: PaintOp) -> Result<bool, PaintError> {
+    let changed = {
+        let mut room = world
+            .get_resource_mut::<CurrentRoom>()
+            .ok_or(PaintError::NoRoom)?;
+        let room = &mut room.0;
+        if x < 0 || y < 0 || x as u32 >= room.width || y as u32 >= room.height {
+            return Err(PaintError::OutsideRoom);
+        }
+        match op {
+            PaintOp::Add(tag) => {
+                if room.tag_bit(&tag).is_none() {
+                    return Err(PaintError::UnknownTag(tag));
+                }
+                if room
+                    .nav_paint
+                    .iter()
+                    .any(|p| p.x == x && p.y == y && p.tag == tag)
+                {
+                    false
+                } else {
+                    room.nav_paint.push(NavPaint { x, y, tag });
+                    true
+                }
+            }
+            PaintOp::Remove(tag) => {
+                let before = room.nav_paint.len();
+                room.nav_paint
+                    .retain(|p| !(p.x == x && p.y == y && p.tag == tag));
+                room.nav_paint.len() != before
+            }
+            PaintOp::Clear => {
+                let before = room.nav_paint.len();
+                room.nav_paint.retain(|p| !(p.x == x && p.y == y));
+                room.nav_paint.len() != before
+            }
+        }
+    };
+    if changed {
+        rebuild_nav_now(world);
+    }
+    Ok(changed)
+}
+
+/// Rebuild the nav map right now (what `rebuild_nav` does on a tick), keeping
+/// the version if nothing about the grid changed.
+fn rebuild_nav_now(world: &mut World) {
+    let tagged: Vec<(u32, Vec2i)> = {
+        let mut q = world.query::<(&NavTags, &SimBody)>();
+        q.iter(world).map(|(t, b)| (t.0, b.0.pos)).collect()
+    };
+    let Some(solids) = world.get_resource::<SolidMap>().map(|s| s.0.clone()) else {
+        return;
+    };
+    let Some(grid) = world
+        .get_resource::<CurrentRoom>()
+        .map(|room| NavMap::build(&room.0, &solids, tagged))
+    else {
+        return;
+    };
+    if let Some(mut nav) = world.get_resource_mut::<NavMap>()
+        && nav.grid != grid
+    {
+        nav.grid = grid;
+        nav.version += 1;
+    }
 }
 
 /// Forget every agent's route (not its target). Called by Stop, Restart and

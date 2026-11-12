@@ -961,3 +961,125 @@ fn the_search_mode_in_the_room_file_reaches_the_agent() {
         assert_eq!(app.world().get::<NavAgent>(e).unwrap().range, expect);
     }
 }
+
+// ---- Painting nav tags from the editor ----
+
+#[test]
+fn painting_a_tag_changes_the_map_and_the_agents_route() {
+    // Gaps at rows 2 and 7; the hunter avoids water, nothing is water yet.
+    let mut app = start(arena(&[2, 7], 5));
+    run(&mut app, 10);
+    let version = app.world().resource::<NavMap>().version;
+    assert!(paint_nav_tile(app.world_mut(), WALL_X, 2, PaintOp::Add("water".into())).unwrap());
+    let nav = app.world().resource::<NavMap>();
+    assert!(
+        nav.version > version,
+        "the map version must go up so routes are replanned"
+    );
+    assert_eq!(
+        nav.grid.tags(WALL_X, 2),
+        1,
+        "water is the first tag declared"
+    );
+    // The route now has to go round by the far gap.
+    let mut through_painted = false;
+    let mut highest = 0;
+    run_until(&mut app, 1200, |app| {
+        let h = body(app, "Hunter");
+        highest = highest.max(h.pos.y);
+        through_painted |= tile(&h) == (WALL_X, 2);
+        status(app) == NavStatus::Arrived
+    });
+    assert!(!through_painted && highest > 6 * TILE);
+}
+
+#[test]
+fn removing_and_clearing_paint_reopens_the_route() {
+    let mut app = start(arena(&[2, 7], 5));
+    for op in [PaintOp::Remove("water".into()), PaintOp::Clear] {
+        let mut app2 = start(arena(&[2, 7], 5));
+        paint_nav_tile(app2.world_mut(), WALL_X, 2, PaintOp::Add("water".into())).unwrap();
+        assert_eq!(app2.world().resource::<NavMap>().grid.tags(WALL_X, 2), 1);
+        assert!(paint_nav_tile(app2.world_mut(), WALL_X, 2, op).unwrap());
+        assert_eq!(app2.world().resource::<NavMap>().grid.tags(WALL_X, 2), 0);
+        let mut through = false;
+        run_until(&mut app2, 900, |app| {
+            through |= tile(&body(app, "Hunter")) == (WALL_X, 2);
+            status(app) == NavStatus::Arrived
+        });
+        assert!(through, "with the paint gone the short way is open");
+    }
+    let _ = &mut app;
+}
+
+#[test]
+fn painting_is_idempotent_and_reports_whether_it_changed_anything() {
+    let mut app = start(arena(&[2, 7], 5));
+    let add = || PaintOp::Add("road".into());
+    assert_eq!(paint_nav_tile(app.world_mut(), 5, 5, add()), Ok(true));
+    let version = app.world().resource::<NavMap>().version;
+    assert_eq!(
+        paint_nav_tile(app.world_mut(), 5, 5, add()),
+        Ok(false),
+        "already there"
+    );
+    assert_eq!(
+        app.world().resource::<NavMap>().version,
+        version,
+        "no change, no new version"
+    );
+    assert_eq!(
+        paint_nav_tile(app.world_mut(), 5, 5, PaintOp::Remove("water".into())),
+        Ok(false)
+    );
+    assert_eq!(
+        paint_nav_tile(app.world_mut(), 6, 6, PaintOp::Clear),
+        Ok(false)
+    );
+    // Two tags on one tile; clearing takes both, removing takes one.
+    paint_nav_tile(app.world_mut(), 5, 5, PaintOp::Add("water".into())).unwrap();
+    assert_eq!(app.world().resource::<NavMap>().grid.tags(5, 5), 0b11);
+    paint_nav_tile(app.world_mut(), 5, 5, PaintOp::Remove("road".into())).unwrap();
+    assert_eq!(app.world().resource::<NavMap>().grid.tags(5, 5), 0b01);
+    paint_nav_tile(app.world_mut(), 5, 5, PaintOp::Clear).unwrap();
+    assert_eq!(app.world().resource::<NavMap>().grid.tags(5, 5), 0);
+}
+
+#[test]
+fn painting_refuses_bad_requests_and_leaves_the_room_alone() {
+    let mut app = start(arena(&[2, 7], 5));
+    let before = app.world().resource::<CurrentRoom>().0.nav_paint.clone();
+    for (x, y) in [(-1, 3), (3, -1), (W as i32, 3), (3, H as i32)] {
+        assert_eq!(
+            paint_nav_tile(app.world_mut(), x, y, PaintOp::Add("water".into())),
+            Err(PaintError::OutsideRoom)
+        );
+    }
+    assert_eq!(
+        paint_nav_tile(app.world_mut(), 3, 3, PaintOp::Add("lava".into())),
+        Err(PaintError::UnknownTag("lava".into()))
+    );
+    assert_eq!(app.world().resource::<CurrentRoom>().0.nav_paint, before);
+    // Without a room at all.
+    let mut bare = test_app(1.0);
+    assert_eq!(
+        paint_nav_tile(bare.world_mut(), 0, 0, PaintOp::Clear),
+        Err(PaintError::NoRoom)
+    );
+    assert!(PaintError::OutsideRoom.to_string().contains("outside"));
+}
+
+#[test]
+fn clearing_paint_leaves_the_tags_objects_bring() {
+    let mut room = arena(&[2, 7], 5);
+    room.place("Puddle", WALL_X, 2); // brings the water tag by standing there
+    let mut app = start(room);
+    paint_nav_tile(app.world_mut(), WALL_X, 2, PaintOp::Add("road".into())).unwrap();
+    assert_eq!(app.world().resource::<NavMap>().grid.tags(WALL_X, 2), 0b11);
+    paint_nav_tile(app.world_mut(), WALL_X, 2, PaintOp::Clear).unwrap();
+    assert_eq!(
+        app.world().resource::<NavMap>().grid.tags(WALL_X, 2),
+        0b01,
+        "the puddle's own tag stays"
+    );
+}

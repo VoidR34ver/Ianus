@@ -32,8 +32,8 @@ pub use collide::{
 };
 pub use input::{MoveBindings, MoveIntent};
 pub use nav::{
-    MAX_EXPANSIONS, NavAgent, NavMap, NavPath, NavStatus, NavTags, NavTarget,
-    speed_from_tiles_per_second,
+    MAX_EXPANSIONS, NavAgent, NavMap, NavPath, NavStatus, NavTags, NavTarget, PaintError, PaintOp,
+    paint_nav_tile, speed_from_tiles_per_second,
 };
 pub use objects::{DueObjects, ObjectSchedule};
 pub use play::{PlayMode, play, step_once, stop};
@@ -51,17 +51,18 @@ pub mod prelude {
     pub use crate::{
         Collider, ColliderIndex, Controlled, CurrentRoom, DueObjects, FileChange, FileWatch,
         IanusAppExt, IanusPlugin, IanusSet, LoadError, MoveBindings, MoveIntent, NavAgent, NavMap,
-        NavPath, NavStatus, NavTags, NavTarget, ObjectSchedule, PlacedObject, PlayMode, PrevPos,
-        ReplayMode, SimBody, SimControl, SimRng, SolidMap, Tick, TickInput, Touching, WorldScale,
-        WorldSettings, begin_playback, begin_recording, finish_recording, footprint_of, load_room,
-        load_room_file, play, restart_world, start_playback, start_recording, step_once, stop,
-        world_hash,
+        NavPath, NavStatus, NavTags, NavTarget, ObjectSchedule, PaintError, PaintOp, PlacedObject,
+        PlayMode, PrevPos, ReplayMode, SimBody, SimControl, SimRng, SolidMap, Tick, TickInput,
+        Touching, WorldScale, WorldSettings, begin_playback, begin_recording, finish_recording,
+        footprint_of, load_room, load_room_file, paint_nav_tile, play, restart_world,
+        start_playback, start_recording, step_once, stop, world_hash,
     };
     pub use ianus_objects::{
         Action, Category, Hitbox, Kind, ObjectDef, Problem, Room, Severity, Substance, WorldRules,
     };
     pub use ianus_sim::{
-        Aabb, Body, Footprint, MoveInput, Replay, Rng, SUBUNITS_PER_TILE, TICK_HZ, Vec2i,
+        Aabb, Body, Footprint, MoveInput, NavCosts, NavFilter, Replay, Rng, SUBUNITS_PER_TILE,
+        SearchRange, TICK_HZ, Vec2i, goal_distance_radius,
     };
 }
 

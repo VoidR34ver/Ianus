@@ -4,6 +4,8 @@
 
 ## 2026-11-12: pathfinding (read after the review note below)
 
+**Next session, first:** (1) check that the Mac workflow run succeeded and that the zip opens on a Mac (unverified); (2) look at the new pathfinding GUI on screen with the owner's OK and fix what is wrong, it has only been tested headlessly; (3) finish the break-it check of the GUI tests (`navtools.rs` helpers and the `PaintNavTile` handler).
+
 Pathfinding is built and tested on the same branch (details in `PROGRESS.md`). Decisions for the owner, with my recommendation:
 - **Many chasers at one target:** today each agent runs A*. For hundreds, add a flow field (one search from the target, every agent follows the gradient). Recommended before a colony-scale test, not before.
 - **Bigger bodies:** the nav grid assumes a 0.75-tile body. Per-footprint grids (cached) are the fix; only needed once something bigger than a tile exists.
