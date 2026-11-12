@@ -2,7 +2,16 @@
 
 *Written 2026-11-11 for the next agent. Read `CLAUDE.md` (rules), `INFO.md` (overview) and `PROGRESS.md` (state) too. Updated later the same day: repo pushed to GitHub, outside review answered.*
 
-## 2026-11-12: logic-skip review (read this first)
+## 2026-11-12: pathfinding (read after the review note below)
+
+Pathfinding is built and tested on the same branch (details in `PROGRESS.md`). Decisions for the owner, with my recommendation:
+- **Many chasers at one target:** today each agent runs A*. For hundreds, add a flow field (one search from the target, every agent follows the gradient). Recommended before a colony-scale test, not before.
+- **Bigger bodies:** the nav grid assumes a 0.75-tile body. Per-footprint grids (cached) are the fix; only needed once something bigger than a tile exists.
+- **Doors and toggled obstacles:** need a rule for whether agents may plan through something that can open. Not decided.
+- **Tag costs (mud is slower, not forbidden):** the grid already stores costs and A* uses them; nothing sets them yet. Wanting it means deciding whether environment `speed_percent` should also slow movement.
+- **Editor:** painting tags onto tiles and drawing routes needs the window; nothing is built there, so tags are authored in room files or code today.
+
+## 2026-11-12: logic-skip review
 
 Branch `claude/logic-skips-investigation-7vqgu5` holds a review that found nine logic skips, fixes for them and tests (list in `PROGRESS.md` Snapshot). It is **not merged**; the owner decides. Step 1 below is now partly done (see `PROGRESS.md` open items). The Rust toolchain on a fresh machine must be 1.99.1 (`cargo` 1.97 fails on Bevy 0.20 dependencies). Open questions for the owner: minimum hitbox size (validator only warns today); whether a tap during pause should be remembered for stepping; replay length cap behaviour.
 

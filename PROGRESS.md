@@ -82,7 +82,7 @@
 
 ## Not built (do not assume these exist)
 
-Per-entity speed (ignored; global tuning applies); environment speed percent (mud does nothing); lights, substance sources, interactables (they only exist as data); any object logic or scripting layer; AI/pathfinding; save files (only replays); editor placement (cannot add/move/save objects from the GUI); anything but the controlled entity moving or colliding; tilemap rendering (placeholder coloured squares); art, audio; multiplayer; Jackdaw integration; CI.
+Per-entity speed for the *player* (agents use theirs; the player still uses the global tuning); environment speed percent (mud does nothing); lights, substance sources, interactables (they only exist as data); any object logic or scripting layer; AI beyond chasing and walking to a tile (no wandering, no avoidance between agents, no doors); save files (only replays); editor placement (cannot add/move/save objects from the GUI); anything but the controlled entity and agents moving or colliding; tilemap rendering (placeholder coloured squares); art, audio; multiplayer; Jackdaw integration; CI.
 
 ## Untested claims
 
