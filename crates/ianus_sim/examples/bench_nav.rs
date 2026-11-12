@@ -12,7 +12,7 @@
 
 use std::time::Instant;
 
-use ianus_sim::{NavCosts, NavFilter, NavGrid, PathFinder, PathOutcome};
+use ianus_sim::{NavCosts, NavFilter, NavGrid, PathFinder, PathOutcome, SearchRange};
 
 struct Lcg(u64);
 impl Lcg {
@@ -98,6 +98,121 @@ fn main() {
             rebuilt_us,
             expanded as f64 / pairs.len() as f64,
             build_us,
+        );
+    }
+
+    search_ranges(&costs, &filter);
+}
+
+/// What the search window (as wide as the distance to the goal) buys, on a
+/// 256x256 room: goals near the agent, and goals sealed in so that no route
+/// exists.
+fn search_ranges(costs: &NavCosts, filter: &NavFilter) {
+    let size = 256u32;
+    let mut rng = Lcg(0xBEEF);
+    let g = room(&mut rng, size);
+    let mut field = Vec::new();
+    g.cost_field(filter, costs, &mut field);
+    let mut pf = PathFinder::new();
+    let mut out = Vec::new();
+
+    let mut near = Vec::new();
+    while near.len() < 400 {
+        let a = (
+            rng.below(size - 60) as i32 + 30,
+            rng.below(size - 60) as i32 + 30,
+        );
+        let b = (
+            a.0 + rng.below(49) as i32 - 24,
+            a.1 + rng.below(49) as i32 - 24,
+        );
+        if g.walkable(a.0, a.1, filter) && g.walkable(b.0, b.1, filter) && a != b {
+            near.push((a, b));
+        }
+    }
+    println!(
+        "\nSearch range on 256x256 (hazards on). Window = square as wide as the distance to the goal."
+    );
+    println!(
+        "{:>34} {:>11} {:>14} {:>10}",
+        "case", "us/search", "tiles looked at", "found"
+    );
+    for (name, range) in [
+        ("whole map", SearchRange::Whole),
+        ("strict window", SearchRange::Strict),
+        ("growing window", SearchRange::Growing),
+    ] {
+        let (mut found, mut expanded) = (0u32, 0u64);
+        let t = Instant::now();
+        for &(a, b) in &near {
+            let r = pf.find_ranged(size, size, &field, range, a, b, u32::MAX, &mut out);
+            found += u32::from(matches!(r, PathOutcome::Found { .. }));
+            expanded += u64::from(pf.last_expansions());
+        }
+        let us = t.elapsed().as_secs_f64() * 1e6 / near.len() as f64;
+        println!(
+            "{:>34} {:>8.1} us {:>14.0} {:>9}%",
+            format!("goal within 24 tiles, {name}"),
+            us,
+            expanded as f64 / near.len() as f64,
+            100 * found / near.len() as u32
+        );
+    }
+
+    // The same short searches, but flattening the map into a cost field first
+    // each time: what a search costs without a kept field.
+    let t = Instant::now();
+    for &(a, b) in &near {
+        pf.find_costed(&g, filter, costs, a, b, u32::MAX, &mut out);
+    }
+    println!(
+        "{:>34} {:>8.1} us",
+        "goal within 24 tiles, no kept field",
+        t.elapsed().as_secs_f64() * 1e6 / near.len() as f64
+    );
+
+    // Sealed goals: a ring of walls round the goal, so no route exists.
+    let mut sealed = g.clone();
+    let mut pairs = Vec::new();
+    while pairs.len() < 60 {
+        let a = (
+            rng.below(size - 60) as i32 + 30,
+            rng.below(size - 60) as i32 + 30,
+        );
+        let b = (
+            a.0 + rng.below(25) as i32 - 12,
+            a.1 + rng.below(25) as i32 - 12,
+        );
+        if a != b && g.walkable(a.0, a.1, filter) && g.walkable(b.0, b.1, filter) {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dy) != (0, 0) {
+                        sealed.set_open(b.0 + dx, b.1 + dy, false);
+                    }
+                }
+            }
+            pairs.push((a, b));
+        }
+    }
+    sealed.cost_field(filter, costs, &mut field);
+    for (name, range) in [
+        ("whole map", SearchRange::Whole),
+        ("strict window", SearchRange::Strict),
+        ("growing window", SearchRange::Growing),
+    ] {
+        let mut expanded = 0u64;
+        let t = Instant::now();
+        for &(a, b) in &pairs {
+            pf.find_ranged(size, size, &field, range, a, b, u32::MAX, &mut out);
+            expanded += u64::from(pf.last_expansions());
+        }
+        let us = t.elapsed().as_secs_f64() * 1e6 / pairs.len() as f64;
+        println!(
+            "{:>34} {:>8.1} us {:>14.0} {:>9}",
+            format!("sealed-in goal, {name}"),
+            us,
+            expanded as f64 / pairs.len() as f64,
+            "none"
         );
     }
 }

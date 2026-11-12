@@ -53,6 +53,7 @@ pub fn chase() -> Room {
         allow: vec![],
         avoid: vec!["water".into()],
         costs: vec![],
+        search: Default::default(),
         stop_distance: 100,
     });
     r.define(nextbot);

@@ -33,8 +33,8 @@ use bevy_ecs::prelude::*;
 use ianus_objects::{AgentTarget, Kind, Room};
 use ianus_sim::{
     Body, Footprint, GROUND_COST, MoveInput, NavCosts, NavFilter, NavGrid, PathFinder, PathOutcome,
-    SUBUNITS_PER_TILE, Solids, Vec2i, raw_path, segment_clear, smooth_path, step_body_max,
-    step_body_solid_max, tile_of,
+    SUBUNITS_PER_TILE, SearchRange, Solids, Vec2i, raw_path, segment_clear, smooth_path,
+    step_body_max, step_body_solid_max, tile_of,
 };
 
 use crate::body::{Controlled, SimBody, step_controlled};
@@ -96,6 +96,10 @@ pub struct NavAgent {
     /// What stepping on each kind of tile costs it, beyond the tile's own cost.
     /// The agent takes the cheapest total route.
     pub costs: NavCosts,
+    /// How far a search may look from where the agent stands: the whole map, a
+    /// window as wide as the distance to the goal, or that window growing until
+    /// a route is found. See [`SearchRange`].
+    pub range: SearchRange,
     /// Top speed on one axis, subunits per tick. `step_body` speeds are 341
     /// (about 5 tiles a second); see [`speed_from_tiles_per_second`].
     pub max_speed: i32,
@@ -104,12 +108,32 @@ pub struct NavAgent {
     pub stop_distance: i32,
 }
 
+/// Everything about an agent that changes which route it plans. If any of it
+/// changes, the route is planned again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NavProfile {
+    filter: NavFilter,
+    costs: NavCosts,
+    range: SearchRange,
+}
+
+impl NavAgent {
+    pub(crate) fn profile(&self) -> NavProfile {
+        NavProfile {
+            filter: self.filter,
+            costs: self.costs,
+            range: self.range,
+        }
+    }
+}
+
 impl Default for NavAgent {
     fn default() -> Self {
         Self {
             target: NavTarget::None,
             filter: NavFilter::ANY,
             costs: NavCosts::NONE,
+            range: SearchRange::Growing,
             max_speed: ianus_sim::MAX_SPEED,
             stop_distance: SUBUNITS_PER_TILE,
         }
@@ -154,8 +178,7 @@ pub struct NavPath {
     goal_tile: (i32, i32),
     map_version: u64,
     /// What the agent was allowed to walk on when this route was planned.
-    filter: NavFilter,
-    costs: NavCosts,
+    profile: NavProfile,
     replan: bool,
     raw: bool,
     stuck_ticks: u32,
@@ -171,10 +194,9 @@ impl NavPath {
         &self.waypoints[self.next.min(self.waypoints.len())..]
     }
 
-    fn fail(&mut self, goal_tile: (i32, i32), version: u64, filter: NavFilter, costs: NavCosts) {
+    fn fail(&mut self, goal_tile: (i32, i32), version: u64, profile: NavProfile) {
         self.status = NavStatus::NoPath;
-        self.filter = filter;
-        self.costs = costs;
+        self.profile = profile;
         self.waypoints.clear();
         self.next = 0;
         self.goal_tile = goal_tile;
@@ -264,6 +286,11 @@ pub(crate) fn agent_from_def(room: &Room, def: &ianus_objects::ObjectDef) -> Opt
                 None => costs,
             }
         }),
+        range: match agent.search {
+            ianus_objects::SearchMode::Whole => SearchRange::Whole,
+            ianus_objects::SearchMode::Strict => SearchRange::Strict,
+            ianus_objects::SearchMode::Growing => SearchRange::Growing,
+        },
         max_speed: speed_from_tiles_per_second(speed),
         stop_distance: (i64::from(agent.stop_distance) * i64::from(SUBUNITS_PER_TILE) / 100)
             .min(i64::from(i32::MAX)) as i32,
@@ -461,8 +488,7 @@ fn plan_paths(
         let stale = path.status == NavStatus::Idle
             || path.goal_tile != goal_tile
             || path.map_version != nav.version
-            || path.filter != agent.filter
-            || path.costs != agent.costs
+            || path.profile != agent.profile()
             || path.replan;
         if !stale {
             continue;
@@ -472,21 +498,22 @@ fn plan_paths(
         let start = grid.nearest_walkable(start_tile, &agent.filter, 2);
         let goal = grid.nearest_walkable(goal_tile, &agent.filter, NEAREST_RADIUS);
         let (Some(start), Some(goal)) = (start, goal) else {
-            path.fail(goal_tile, nav.version, agent.filter, agent.costs);
+            path.fail(goal_tile, nav.version, agent.profile());
             continue;
         };
         let field = fields.get(&nav, &agent.filter, &agent.costs);
-        let outcome = scratch.finder.find_in_field(
+        let outcome = scratch.finder.find_ranged(
             grid.width(),
             grid.height(),
             field,
+            agent.range,
             start,
             goal,
             MAX_EXPANSIONS,
             &mut scratch.tiles,
         );
         if !matches!(outcome, PathOutcome::Found { .. }) {
-            path.fail(goal_tile, nav.version, agent.filter, agent.costs);
+            path.fail(goal_tile, nav.version, agent.profile());
             continue;
         }
 
@@ -542,8 +569,7 @@ fn plan_paths(
         }
         path.goal_tile = goal_tile;
         path.map_version = nav.version;
-        path.filter = agent.filter;
-        path.costs = agent.costs;
+        path.profile = agent.profile();
         path.replan = false;
         path.stuck_ticks = 0;
         path.stuck_from = body.0.pos;
@@ -681,7 +707,7 @@ fn step_agents(nav: Option<Res<NavMap>>, solids: Option<Res<SolidMap>>, mut agen
                     path.replan = true;
                     if path.strikes >= MAX_STRIKES {
                         let (goal_tile, version) = (path.goal_tile, path.map_version);
-                        path.fail(goal_tile, version, agent.filter, agent.costs);
+                        path.fail(goal_tile, version, agent.profile());
                     }
                 }
             }

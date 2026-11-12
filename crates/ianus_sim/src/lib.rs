@@ -20,8 +20,8 @@ pub mod solid;
 pub use aabb::Aabb;
 pub use broadphase::BroadPhase;
 pub use nav::{
-    GROUND_COST, NavCosts, NavFilter, NavGrid, PathFinder, PathOutcome, raw_path, segment_clear,
-    smooth_path,
+    GROUND_COST, NavCosts, NavFilter, NavGrid, PathFinder, PathOutcome, SearchRange, TileWindow,
+    goal_distance_radius, raw_path, segment_clear, smooth_path,
 };
 pub use replay::{Replay, ReplayError};
 pub use rng::Rng;

@@ -241,6 +241,94 @@ pub enum PathOutcome {
     BadStart,
     /// The goal tile is not walkable for this filter.
     BadGoal,
+    /// No route exists *inside the search window*. One may exist outside it.
+    /// Only returned for a search that was not allowed to look further.
+    NoPathInWindow,
+}
+
+/// A rectangle of tiles, edges included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileWindow {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+impl TileWindow {
+    /// The square of tiles within `radius` of `centre` (Chebyshev distance), so
+    /// `radius` tiles out from the centre tile on every side.
+    pub const fn around(centre: (i32, i32), radius: i32) -> Self {
+        Self {
+            x0: centre.0.saturating_sub(radius),
+            y0: centre.1.saturating_sub(radius),
+            x1: centre.0.saturating_add(radius),
+            y1: centre.1.saturating_add(radius),
+        }
+    }
+
+    /// The whole of a `width` x `height` map.
+    pub const fn whole(width: u32, height: u32) -> Self {
+        Self {
+            x0: 0,
+            y0: 0,
+            x1: width as i32 - 1,
+            y1: height as i32 - 1,
+        }
+    }
+
+    #[inline]
+    pub const fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
+    }
+
+    /// Does this window include every tile of a `width` x `height` map?
+    pub const fn covers(&self, width: u32, height: u32) -> bool {
+        self.x0 <= 0 && self.y0 <= 0 && self.x1 >= width as i32 - 1 && self.y1 >= height as i32 - 1
+    }
+}
+
+/// How far a search may look from where the agent stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SearchRange {
+    /// The whole map. Never misses a route, but a goal that cannot be reached
+    /// makes the search visit every tile it can get to.
+    Whole,
+    /// Only a square window centred on the agent, as wide as the distance to
+    /// the goal (see [`goal_distance_radius`]): the goal is always just inside
+    /// it. Cheap, and gives up fast on a goal the window cannot reach, such as
+    /// one just across a long wall whose way round is outside the window.
+    Strict,
+    /// Start with that window, and if there is no route inside it try one twice
+    /// as wide, and so on until the window covers the map. Finds a route
+    /// whenever one exists, and does the small searches first. The route
+    /// found in a small window is the best one inside it, which can be a little
+    /// longer than the best one on the whole map.
+    #[default]
+    Growing,
+}
+
+/// The half-width of the search window for a goal: the length of the vector
+/// from `start` to `goal`, rounded up to a whole tile, and at least 1. Since a
+/// vector is never shorter than its larger component, the goal is always
+/// inside a window of this radius. Integer maths only.
+pub fn goal_distance_radius(start: (i32, i32), goal: (i32, i32)) -> i32 {
+    let dx = i64::from(goal.0) - i64::from(start.0);
+    let dy = i64::from(goal.1) - i64::from(start.1);
+    let squared = (dx * dx + dy * dy) as u64;
+    // Smallest r with r * r >= squared, by binary search on integers (no
+    // floating point anywhere in this crate).
+    let (mut lo, mut hi) = (0u64, squared.min(1 << 32));
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if mid * mid >= squared {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    let r = lo;
+    (r.max(1)).min(i32::MAX as u64) as i32
 }
 
 /// Neighbour offsets in a fixed order: the four straight ones, then the
@@ -366,6 +454,35 @@ impl PathFinder {
         max_expansions: u32,
         out: &mut Vec<(i32, i32)>,
     ) -> PathOutcome {
+        let whole = TileWindow::whole(width, height);
+        self.find_in_window(
+            width,
+            height,
+            field,
+            whole,
+            start,
+            goal,
+            max_expansions,
+            out,
+        )
+    }
+
+    /// [`find_in_field`](Self::find_in_field), but never looking at a tile
+    /// outside `window`. [`PathOutcome::NoPathInWindow`] means no route exists
+    /// inside it (one may exist outside); if the window covers the whole map the
+    /// answer is [`PathOutcome::NoPath`] as usual.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_in_window(
+        &mut self,
+        width: u32,
+        height: u32,
+        field: &[u16],
+        window: TileWindow,
+        start: (i32, i32),
+        goal: (i32, i32),
+        max_expansions: u32,
+        out: &mut Vec<(i32, i32)>,
+    ) -> PathOutcome {
         out.clear();
         self.expansions = 0;
         let (w, h) = (width as i32, height as i32);
@@ -387,6 +504,10 @@ impl PathFinder {
             out.push(start);
             return PathOutcome::Found { cost: 0 };
         }
+        if !window.contains(start.0, start.1) || !window.contains(goal.0, goal.1) {
+            return PathOutcome::NoPathInWindow;
+        }
+        let complete = window.covers(width, height);
 
         self.prepare(field.len());
         let gen_ = self.generation;
@@ -429,6 +550,9 @@ impl PathFinder {
             let (x, y) = ((i as i32) % w, (i as i32) / w);
             for (k, &(dx, dy)) in NEIGHBOURS.iter().enumerate() {
                 let (nx, ny) = (x + dx, y + dy);
+                if !window.contains(nx, ny) {
+                    continue;
+                }
                 let tile_cost = step_onto(nx, ny);
                 if tile_cost == 0 {
                     continue;
@@ -461,7 +585,57 @@ impl PathFinder {
                 }
             }
         }
-        PathOutcome::NoPath
+        if complete {
+            PathOutcome::NoPath
+        } else {
+            PathOutcome::NoPathInWindow
+        }
+    }
+
+    /// Search with a [`SearchRange`] on a cost field: the window is sized from
+    /// the distance to the goal (see [`goal_distance_radius`]).
+    ///
+    /// * `Whole` searches the whole map.
+    /// * `Strict` searches only that window and reports
+    ///   [`PathOutcome::NoPathInWindow`] if the route is not inside it.
+    /// * `Growing` doubles the window until a route is found or the window
+    ///   covers the map (then the answer is final).
+    ///
+    /// `max_expansions` applies to each attempt. A capped attempt ends the whole
+    /// search with [`PathOutcome::Capped`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_ranged(
+        &mut self,
+        width: u32,
+        height: u32,
+        field: &[u16],
+        range: SearchRange,
+        start: (i32, i32),
+        goal: (i32, i32),
+        max_expansions: u32,
+        out: &mut Vec<(i32, i32)>,
+    ) -> PathOutcome {
+        if range == SearchRange::Whole {
+            return self.find_in_field(width, height, field, start, goal, max_expansions, out);
+        }
+        let mut radius = goal_distance_radius(start, goal);
+        loop {
+            let window = TileWindow::around(start, radius);
+            let outcome = self.find_in_window(
+                width,
+                height,
+                field,
+                window,
+                start,
+                goal,
+                max_expansions,
+                out,
+            );
+            if outcome != PathOutcome::NoPathInWindow || range == SearchRange::Strict {
+                return outcome;
+            }
+            radius = radius.saturating_mul(2);
+        }
     }
 }
 
@@ -705,6 +879,7 @@ mod tests {
                     assert!(out.is_empty());
                 }
                 PathOutcome::Capped => panic!("no cap was set"),
+                PathOutcome::NoPathInWindow => panic!("searched the whole map"),
             }
         }
         assert!(
@@ -1214,5 +1389,307 @@ mod tests {
             assert_eq!(r1, r2);
             assert_eq!(a, b);
         }
+    }
+
+    // ---- Search window: as wide as the distance to the goal ----
+
+    #[test]
+    fn the_window_radius_is_the_distance_rounded_up() {
+        assert_eq!(
+            goal_distance_radius((0, 0), (3, 4)),
+            5,
+            "an exact square root is not bumped"
+        );
+        assert_eq!(
+            goal_distance_radius((0, 0), (1, 1)),
+            2,
+            "1.41 rounds up to 2"
+        );
+        assert_eq!(
+            goal_distance_radius((0, 0), (1, 2)),
+            3,
+            "2.24 rounds up to 3"
+        );
+        assert_eq!(goal_distance_radius((0, 0), (0, 7)), 7);
+        assert_eq!(goal_distance_radius((5, 5), (5, 5)), 1, "at least one tile");
+        assert_eq!(
+            goal_distance_radius((9, 2), (-3, -2)),
+            13,
+            "direction does not matter: 12,4 is 12.65"
+        );
+        // For every offset: the smallest radius whose square is at least the
+        // squared distance, and never smaller than the larger component, so the
+        // goal is always inside the window.
+        for dx in -40i32..=40 {
+            for dy in -40i32..=40 {
+                let r = i64::from(goal_distance_radius((0, 0), (dx, dy)));
+                let d2 = i64::from(dx) * i64::from(dx) + i64::from(dy) * i64::from(dy);
+                assert!(r * r >= d2, "{dx},{dy}: {r} is too small");
+                assert!(
+                    d2 <= 1 || (r - 1) * (r - 1) < d2,
+                    "{dx},{dy}: {r} is rounded up too far"
+                );
+                assert!(
+                    r >= i64::from(dx.abs().max(dy.abs())),
+                    "{dx},{dy}: goal outside the window"
+                );
+            }
+        }
+        // Huge distances do not overflow.
+        assert!(goal_distance_radius((i32::MIN / 2, 0), (i32::MAX / 2, 0)) > 0);
+    }
+
+    #[test]
+    fn windows_contain_and_cover() {
+        let w = TileWindow::around((5, 5), 2);
+        assert!(w.contains(3, 3) && w.contains(7, 7) && !w.contains(8, 5) && !w.contains(5, 2));
+        assert!(!w.covers(10, 10));
+        assert!(TileWindow::around((5, 5), 9).covers(10, 10));
+        assert!(TileWindow::whole(10, 10).covers(10, 10));
+        assert!(!TileWindow::whole(10, 10).covers(11, 10));
+    }
+
+    /// A wall with its only gap far from the two sides, so the way round is
+    /// long. 41 wide, 21 tall: wall at x = 20 from y = 0 to y = 19, open at
+    /// y = 20. The two ends are 2 tiles apart, either side of the wall.
+    fn long_wall() -> NavGrid {
+        let mut g = NavGrid::new(41, 21);
+        for y in 0..20 {
+            g.set_open(20, y, false);
+        }
+        g
+    }
+
+    #[test]
+    fn a_strict_window_gives_up_on_a_goal_whose_way_round_is_outside_it() {
+        let g = long_wall();
+        let mut field = Vec::new();
+        g.cost_field(&NavFilter::ANY, &NavCosts::NONE, &mut field);
+        let (s, t) = ((19, 2), (21, 2));
+        let mut pf = PathFinder::new();
+        let mut out = Vec::new();
+        // The goal is 2 tiles away, so the window is radius 2: x 17..21, y 0..4.
+        let r = pf.find_ranged(
+            41,
+            21,
+            &field,
+            SearchRange::Strict,
+            s,
+            t,
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::NoPathInWindow);
+        assert!(out.is_empty());
+        assert!(
+            pf.last_expansions() <= 25,
+            "looked at {} tiles, but the window has only 25",
+            pf.last_expansions()
+        );
+        // Searching the whole map finds the long way round.
+        let whole = pf.find_ranged(41, 21, &field, SearchRange::Whole, s, t, u32::MAX, &mut out);
+        let PathOutcome::Found { cost: whole_cost } = whole else {
+            panic!("{whole:?}")
+        };
+        assert!(
+            out.iter().any(|&(_, y)| y == 20),
+            "the route goes through the gap"
+        );
+        // Growing finds the same route: it keeps widening the window.
+        let grown = pf.find_ranged(
+            41,
+            21,
+            &field,
+            SearchRange::Growing,
+            s,
+            t,
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(grown, PathOutcome::Found { cost: whole_cost });
+    }
+
+    #[test]
+    fn a_window_that_covers_the_map_gives_a_final_answer() {
+        // A goal that really cannot be reached: Growing ends in NoPath (not
+        // "no path in window"), and a covering window says NoPath too.
+        let mut g = NavGrid::new(20, 20);
+        for i in 0..20 {
+            g.set_open(10, i, false);
+        }
+        let mut field = Vec::new();
+        g.cost_field(&NavFilter::ANY, &NavCosts::NONE, &mut field);
+        let mut pf = PathFinder::new();
+        let mut out = Vec::new();
+        let r = pf.find_ranged(
+            20,
+            20,
+            &field,
+            SearchRange::Growing,
+            (5, 5),
+            (15, 5),
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::NoPath);
+        let r = pf.find_in_window(
+            20,
+            20,
+            &field,
+            TileWindow::whole(20, 20),
+            (5, 5),
+            (15, 5),
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::NoPath);
+        // A window that leaves the goal out cannot find it.
+        let r = pf.find_in_window(
+            20,
+            20,
+            &field,
+            TileWindow::around((5, 5), 3),
+            (5, 5),
+            (15, 5),
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::NoPathInWindow);
+    }
+
+    #[test]
+    fn in_open_ground_every_range_finds_the_same_route() {
+        let g = NavGrid::new(60, 60);
+        let mut field = Vec::new();
+        g.cost_field(&NavFilter::ANY, &NavCosts::NONE, &mut field);
+        let mut pf = PathFinder::new();
+        let mut rng = Lcg(77);
+        let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..100 {
+            let s = (rng.below(60) as i32, rng.below(60) as i32);
+            let t = (rng.below(60) as i32, rng.below(60) as i32);
+            let ra = pf.find_ranged(60, 60, &field, SearchRange::Whole, s, t, u32::MAX, &mut a);
+            let rb = pf.find_ranged(60, 60, &field, SearchRange::Strict, s, t, u32::MAX, &mut b);
+            let rc = pf.find_ranged(60, 60, &field, SearchRange::Growing, s, t, u32::MAX, &mut c);
+            assert_eq!(ra, rb);
+            assert_eq!(ra, rc);
+        }
+    }
+
+    #[test]
+    fn a_growing_search_always_finds_a_legal_route_whenever_one_exists() {
+        let mut rng = Lcg(31);
+        let mut pf = PathFinder::new();
+        let (mut out, mut whole_out) = (Vec::new(), Vec::new());
+        let (mut same, mut longer, mut missed_by_strict) = (0, 0, 0);
+        for case in 0..800 {
+            let g = random_grid(&mut rng, 25, 25, 33);
+            let filter = NavFilter::ANY;
+            let mut field = Vec::new();
+            g.cost_field(&filter, &NavCosts::NONE, &mut field);
+            let s = (rng.below(25) as i32, rng.below(25) as i32);
+            let t = (rng.below(25) as i32, rng.below(25) as i32);
+            let whole = pf.find_in_field(25, 25, &field, s, t, u32::MAX, &mut whole_out);
+            let grown = pf.find_ranged(
+                25,
+                25,
+                &field,
+                SearchRange::Growing,
+                s,
+                t,
+                u32::MAX,
+                &mut out,
+            );
+            let strict = pf.find_ranged(
+                25,
+                25,
+                &field,
+                SearchRange::Strict,
+                s,
+                t,
+                u32::MAX,
+                &mut Vec::new(),
+            );
+            match (whole, grown) {
+                (PathOutcome::Found { cost: w }, PathOutcome::Found { cost: g_cost }) => {
+                    // A legal route (steps adjacent, walkable, no corner cutting) ...
+                    assert_eq!(route_cost(&g, &filter, &out), g_cost, "case {case}");
+                    // ... never cheaper than the best on the whole map, and
+                    // usually the same.
+                    assert!(g_cost >= w, "case {case}: cheaper than optimal");
+                    if g_cost == w {
+                        same += 1
+                    } else {
+                        longer += 1
+                    }
+                    if strict == PathOutcome::NoPathInWindow {
+                        missed_by_strict += 1;
+                    }
+                }
+                (a, b) => assert_eq!(
+                    a, b,
+                    "case {case}: growing disagrees with the whole map about reachability"
+                ),
+            }
+        }
+        assert!(same > 100, "weak test: {same} equal");
+        assert!(
+            missed_by_strict > 0,
+            "weak test: strict never missed ({missed_by_strict})"
+        );
+        // Be honest about the trade: a small window can give a slightly longer route.
+        eprintln!(
+            "growing: {same} identical to the best route, {longer} a little longer; strict missed {missed_by_strict}"
+        );
+    }
+
+    #[test]
+    fn a_strict_window_makes_giving_up_cheap() {
+        // A goal sealed in a box far inside a big map: the whole-map search has
+        // to visit everything it can reach, the strict one only its window.
+        let mut g = NavGrid::new(200, 200);
+        for d in -2..=2 {
+            for (x, y) in [
+                (150 + d, 148),
+                (150 + d, 152),
+                (148, 150 + d),
+                (152, 150 + d),
+            ] {
+                g.set_open(x, y, false);
+            }
+        }
+        let mut field = Vec::new();
+        g.cost_field(&NavFilter::ANY, &NavCosts::NONE, &mut field);
+        let mut pf = PathFinder::new();
+        let mut out = Vec::new();
+        let (s, t) = ((140, 150), (150, 150));
+        let strict = pf.find_ranged(
+            200,
+            200,
+            &field,
+            SearchRange::Strict,
+            s,
+            t,
+            u32::MAX,
+            &mut out,
+        );
+        let strict_expansions = pf.last_expansions();
+        assert_eq!(strict, PathOutcome::NoPathInWindow);
+        let whole = pf.find_ranged(
+            200,
+            200,
+            &field,
+            SearchRange::Whole,
+            s,
+            t,
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(whole, PathOutcome::NoPath);
+        assert!(
+            strict_expansions * 20 < pf.last_expansions(),
+            "strict looked at {strict_expansions} tiles, whole at {}",
+            pf.last_expansions()
+        );
     }
 }

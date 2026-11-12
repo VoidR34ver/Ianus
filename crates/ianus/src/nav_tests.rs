@@ -35,6 +35,7 @@ fn arena(gaps: &[i32], hunter_speed: u32) -> Room {
         allow: vec![],
         avoid: vec!["water".into()],
         costs: vec![],
+        search: Default::default(),
         stop_distance: 100,
     });
     r.define(hunter);
@@ -858,4 +859,105 @@ fn a_straight_leg_never_cuts_across_a_hazard_the_search_went_round() {
         assert_ne!(tile(&b), (WALL_X, 2), "walked through the fire");
         status(app) == NavStatus::Arrived
     });
+}
+
+// ---- Search window: as wide as the distance to the goal ----
+
+use ianus_objects::SearchMode;
+use ianus_sim::SearchRange;
+
+/// A 41x22 room with a wall at x = 20 open only at the top (row 20). The
+/// hunter stands at (19, 2) and the player at (21, 2): two tiles apart, either
+/// side of the wall, with a long way round.
+fn long_wall_room(mode: SearchMode) -> Room {
+    let mut r = Room::new("LongWall", 41, 22);
+    r.define(ObjectDef::with_kind(
+        "Player",
+        Kind::Entity {
+            controlled: true,
+            speed_tiles_per_s: 5,
+        },
+    ));
+    let mut hunter = ObjectDef::with_kind(
+        "Hunter",
+        Kind::Entity {
+            controlled: false,
+            speed_tiles_per_s: 5,
+        },
+    );
+    hunter.agent = Some(AgentDef {
+        search: mode,
+        ..AgentDef::default()
+    });
+    r.define(hunter);
+    r.define(ObjectDef::new("Wall", Category::Wall));
+    for x in 0..41 {
+        r.place("Wall", x, 0);
+        r.place("Wall", x, 21);
+    }
+    for y in 1..21 {
+        r.place("Wall", 0, y);
+        r.place("Wall", 40, y);
+        if y != 20 {
+            r.place("Wall", 20, y);
+        }
+    }
+    r.place("Player", 21, 2);
+    r.place("Hunter", 19, 2);
+    r
+}
+
+#[test]
+fn a_strict_window_gives_up_where_a_growing_one_walks_round() {
+    // The goal is 2 tiles away, so a strict window is 2 tiles each way, and the
+    // gap in the wall is 18 rows up.
+    let mut strict = start(long_wall_room(SearchMode::Strict));
+    run(&mut strict, 120);
+    assert_eq!(status(&mut strict), NavStatus::NoPath);
+    assert!(
+        body(&mut strict, "Hunter").pos.x < 20 * TILE,
+        "it should wait at the wall"
+    );
+
+    let mut growing = start(long_wall_room(SearchMode::Growing));
+    let mut highest = 0;
+    run_until(&mut growing, 2000, |app| {
+        highest = highest.max(body(app, "Hunter").pos.y);
+        status(app) == NavStatus::Arrived
+    });
+    assert!(highest > 19 * TILE, "went up to the gap");
+    assert!(body(&mut growing, "Hunter").pos.x > 20 * TILE);
+
+    let mut whole = start(long_wall_room(SearchMode::Whole));
+    run_until(&mut whole, 2000, |app| status(app) == NavStatus::Arrived);
+}
+
+#[test]
+fn changing_the_search_range_replans() {
+    let mut app = start(long_wall_room(SearchMode::Strict));
+    run(&mut app, 30);
+    assert_eq!(status(&mut app), NavStatus::NoPath);
+    let e = entity(&mut app, "Hunter");
+    app.world_mut().get_mut::<NavAgent>(e).unwrap().range = SearchRange::Growing;
+    run_until(&mut app, 2000, |app| status(app) == NavStatus::Arrived);
+}
+
+#[test]
+fn the_search_mode_in_the_room_file_reaches_the_agent() {
+    for (mode, expect) in [
+        (SearchMode::Strict, SearchRange::Strict),
+        (SearchMode::Growing, SearchRange::Growing),
+        (SearchMode::Whole, SearchRange::Whole),
+    ] {
+        let text = long_wall_room(mode).to_text();
+        assert_eq!(
+            text.contains("search"),
+            mode != SearchMode::Growing,
+            "only a non-default mode is written to the file"
+        );
+        let mut app = test_app(1.0);
+        load_room(app.world_mut(), Room::from_text(&text).unwrap()).unwrap();
+        let e = entity(&mut app, "Hunter");
+        assert_eq!(app.world().get::<NavAgent>(e).unwrap().range, expect);
+    }
 }

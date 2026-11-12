@@ -522,6 +522,7 @@ fn chaser() -> ObjectDef {
         allow: vec![],
         avoid: vec!["water".into()],
         costs: vec![],
+        search: Default::default(),
         stop_distance: 150,
     });
     d

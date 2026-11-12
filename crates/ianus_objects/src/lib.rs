@@ -167,6 +167,23 @@ impl Kind {
     }
 }
 
+/// How far an agent's route search may look from where it stands. The search
+/// window is a square centred on the agent, as wide as the distance to the goal
+/// (rounded up).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SearchMode {
+    /// Search only that window. Cheap, and it gives up quickly on a goal whose
+    /// way round lies outside it (such as one just across a long wall).
+    Strict,
+    /// Search that window; if there is no route in it, a window twice as wide,
+    /// and so on until a route is found or the whole map has been searched.
+    /// Never misses a reachable goal. The default.
+    #[default]
+    Growing,
+    /// Always search the whole map.
+    Whole,
+}
+
 /// Who an agent goes after.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentTarget {
@@ -175,6 +192,10 @@ pub enum AgentTarget {
     Controlled,
     /// The first placed object with this name.
     Named(String),
+}
+
+fn is_default_search(mode: &SearchMode) -> bool {
+    *mode == SearchMode::default()
 }
 
 fn hundred() -> u32 {
@@ -218,6 +239,9 @@ pub struct AgentDef {
     /// hazard and a long way round.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub costs: Vec<TagCost>,
+    /// How far a route search may look. See [`SearchMode`].
+    #[serde(default, skip_serializing_if = "is_default_search")]
+    pub search: SearchMode,
     /// Stops this close to the target, in hundredths of a tile.
     #[serde(default = "hundred")]
     pub stop_distance: u32,
@@ -230,6 +254,7 @@ impl Default for AgentDef {
             allow: Vec::new(),
             avoid: Vec::new(),
             costs: Vec::new(),
+            search: SearchMode::default(),
             stop_distance: 100,
         }
     }
