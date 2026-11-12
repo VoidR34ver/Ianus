@@ -29,7 +29,7 @@ Each tick runs `Input → World → Objects → Sim → Detect`. Objects are "th
 
 **Written but not tested end to end:** per-object colliders, `Touching`, `DueObjects`, the phase chain. Nothing consumes `DueObjects` yet.
 
-**Built on the review branch:** pathfinding (A* with walk-on and avoid tags) and agents that chase the player or walk to a tile; see `PROGRESS.md`.
+**Built on the review branch:** pathfinding (A* with walk-on and avoid tags and per-agent hazard costs) and agents that chase the player or walk to a tile; see `PROGRESS.md`.
 
 **Not built:** anything but the controlled entity and agents moving; avoidance between agents; save files (only replays); placing objects from the GUI; scripting layer; lights, substances, interactables (data only); art and audio; CI; Jackdaw integration (never built).
 

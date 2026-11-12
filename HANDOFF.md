@@ -8,7 +8,8 @@ Pathfinding is built and tested on the same branch (details in `PROGRESS.md`). D
 - **Many chasers at one target:** today each agent runs A*. For hundreds, add a flow field (one search from the target, every agent follows the gradient). Recommended before a colony-scale test, not before.
 - **Bigger bodies:** the nav grid assumes a 0.75-tile body. Per-footprint grids (cached) are the fix; only needed once something bigger than a tile exists.
 - **Doors and toggled obstacles:** need a rule for whether agents may plan through something that can open. Not decided.
-- **Tag costs (mud is slower, not forbidden):** the grid already stores costs and A* uses them; nothing sets them yet. Wanting it means deciding whether environment `speed_percent` should also slow movement.
+- **Speed of pathfinding:** measured in `PROGRESS.md` (about 0.2 us per tile; 1.4 ms for a 256x256 search). Options, cheapest first: a search range limit (Minecraft's "follow range", also a gameplay choice: beyond it the mob loses you), accepting a partial path to the closest reachable tile when the target is cut off (Minecraft does this; today the agent reports NoPath and waits), a faster open list (bucket queue, changes which of equal-cost routes is picked but stays deterministic), a flow field for crowds. Which of these you want is yours to say.
+- **Hazard costs and movement speed:** costs now change the route. Should mud also slow movement (environment `speed_percent`)? Then cost and speed should come from one setting.
 - **Editor:** painting tags onto tiles and drawing routes needs the window; nothing is built there, so tags are authored in room files or code today.
 
 ## 2026-11-12: logic-skip review

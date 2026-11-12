@@ -52,6 +52,7 @@ pub fn chase() -> Room {
         target: AgentTarget::Controlled,
         allow: vec![],
         avoid: vec!["water".into()],
+        costs: vec![],
         stop_distance: 100,
     });
     r.define(nextbot);

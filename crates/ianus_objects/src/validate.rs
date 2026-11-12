@@ -421,6 +421,29 @@ impl Room {
                     unknown_tag(format!("The agent '{name}'"), tag, problems);
                 }
             }
+            for (n, tc) in agent.costs.iter().enumerate() {
+                if self.tag_bit(&tc.tag).is_none() {
+                    unknown_tag(format!("The agent '{name}'"), &tc.tag, problems);
+                }
+                if tc.cost == 0 {
+                    problems.push(Problem::warning(format!(
+                        "Agent '{name}' has a cost of 0 on '{}', which changes nothing. Remove it or give it a cost (a plain step is 10).",
+                        tc.tag
+                    )));
+                }
+                if agent.avoid.contains(&tc.tag) {
+                    problems.push(Problem::warning(format!(
+                        "Agent '{name}' has a cost on '{}' and also avoids it. Avoiding wins, so the cost never applies.",
+                        tc.tag
+                    )));
+                }
+                if agent.costs[..n].iter().any(|o| o.tag == tc.tag) {
+                    problems.push(Problem::warning(format!(
+                        "Agent '{name}' lists a cost for '{}' more than once. The last one is used.",
+                        tc.tag
+                    )));
+                }
+            }
             if let Some(both) = agent.allow.iter().find(|t| agent.avoid.contains(t)) {
                 problems.push(Problem::warning(format!(
                     "Agent '{name}' both allows and avoids the tag '{both}'. Avoiding wins, so it will never walk there."

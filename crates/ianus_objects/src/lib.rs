@@ -181,6 +181,18 @@ fn hundred() -> u32 {
     100
 }
 
+/// How much extra it costs an agent to step onto a tile carrying a tag. Unlike
+/// `avoid`, the tag is not forbidden: the agent takes the route with the lowest
+/// total cost, so it wades through shallow water to save a long detour but goes
+/// round fire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagCost {
+    pub tag: String,
+    /// Added to the cost of stepping onto such a tile. A plain step costs 10, so
+    /// 40 means "as bad as four extra tiles of walking".
+    pub cost: u8,
+}
+
 /// Makes an entity walk to its target by itself, around walls, using the
 /// level's pathfinding. Movement is the same physics the player has, so an
 /// agent stops at walls the same way and is as fast as its
@@ -201,6 +213,11 @@ pub struct AgentDef {
     /// Tiles carrying any of these tags are never entered. Wins over `allow`.
     #[serde(default)]
     pub avoid: Vec<String>,
+    /// Tags that are allowed but cost extra to step on. The agent picks the
+    /// cheapest total route, so these decide between a short way through a
+    /// hazard and a long way round.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub costs: Vec<TagCost>,
     /// Stops this close to the target, in hundredths of a tile.
     #[serde(default = "hundred")]
     pub stop_distance: u32,
@@ -212,6 +229,7 @@ impl Default for AgentDef {
             target: AgentTarget::Controlled,
             allow: Vec::new(),
             avoid: Vec::new(),
+            costs: Vec::new(),
             stop_distance: 100,
         }
     }

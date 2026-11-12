@@ -35,6 +35,7 @@ cargo fmt --all
 cargo build --workspace --examples               # compiles the window examples, does NOT open them
 cargo run --release -p ianus_sim --example bench_hitboxes
 cargo run --release -p ianus_sim --example bench_schedule
+cargo run --release -p ianus_sim --example bench_nav
 cargo run -p ianus_objects --example write_cellar   # regenerates rooms/cellar.room
 cargo run -p ianus_objects --example write_chase    # regenerates rooms/chase.room
 ```

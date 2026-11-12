@@ -48,6 +48,47 @@ impl NavFilter {
     }
 }
 
+/// What it costs one agent to step onto a tile carrying each tag, on top of the
+/// tile's own cost. This is the Minecraft idea of a path "malus": water is not
+/// forbidden, it is *expensive*, so the cheapest total route wins, and a long
+/// way round beats a short wade only when the detour costs less than the
+/// hazard. 0 (the default) means the tag costs nothing extra. Forbidding a tag
+/// outright is [`NavFilter::deny`].
+///
+/// A tile carrying several tags costs its worst one, not the sum.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct NavCosts([u8; 32]);
+
+impl NavCosts {
+    /// No extra costs.
+    pub const NONE: NavCosts = NavCosts([0; 32]);
+
+    /// The same costs with tag number `tag_index` (its bit position) costing
+    /// `extra` more. Indexes of 32 or more are ignored.
+    pub const fn with(mut self, tag_index: usize, extra: u8) -> Self {
+        if tag_index < 32 {
+            self.0[tag_index] = extra;
+        }
+        self
+    }
+
+    /// The extra cost of tag number `tag_index`.
+    pub const fn get(&self, tag_index: usize) -> u8 {
+        if tag_index < 32 { self.0[tag_index] } else { 0 }
+    }
+
+    /// The extra cost of a tile carrying these tags: its worst hazard.
+    #[inline]
+    pub fn extra(&self, mut tags: u32) -> u16 {
+        let mut worst = 0u8;
+        while tags != 0 {
+            worst = worst.max(self.0[tags.trailing_zeros() as usize]);
+            tags &= tags - 1;
+        }
+        u16::from(worst)
+    }
+}
+
 /// The map pathfinding runs on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NavGrid {
@@ -133,6 +174,24 @@ impl NavGrid {
         }
     }
 
+    /// Flatten the grid for one kind of agent into a plain array of step costs,
+    /// one per tile, row by row: 0 where the agent may not stand, otherwise the
+    /// tile's own cost plus the extra cost of its worst hazard. A search then
+    /// needs nothing but array lookups, and the array can be kept as long as
+    /// the grid does not change.
+    pub fn cost_field(&self, filter: &NavFilter, costs: &NavCosts, out: &mut Vec<u16>) {
+        out.clear();
+        out.reserve(self.open.len());
+        for i in 0..self.open.len() {
+            let tags = self.tags[i];
+            out.push(if self.open[i] && filter.admits(tags) {
+                u16::from(self.cost[i]) + costs.extra(tags)
+            } else {
+                0
+            });
+        }
+    }
+
     /// The closest walkable tile to `(x, y)` within `max_radius` tiles, or the
     /// tile itself if it is walkable. "Closest" means the smallest square ring
     /// around the tile that holds a walkable one; inside that ring, the shortest
@@ -208,6 +267,7 @@ pub struct PathFinder {
     generation: u32,
     heap: BinaryHeap<Reverse<(u32, u32, u32)>>,
     expansions: u32,
+    field: Vec<u16>,
 }
 
 impl PathFinder {
@@ -241,7 +301,9 @@ impl PathFinder {
     /// Find the cheapest route from `start` to `goal` (tile coordinates) for
     /// an agent with `filter`, expanding at most `max_expansions` tiles.
     /// On [`PathOutcome::Found`] `out` holds the tiles from start to goal;
-    /// otherwise it is left empty.
+    /// otherwise it is left empty. Builds the agent's cost field for this one
+    /// search; anything that searches often should keep a field with
+    /// [`NavGrid::cost_field`] and call [`PathFinder::find_in_field`].
     pub fn find(
         &mut self,
         grid: &NavGrid,
@@ -251,12 +313,74 @@ impl PathFinder {
         max_expansions: u32,
         out: &mut Vec<(i32, i32)>,
     ) -> PathOutcome {
+        self.find_costed(
+            grid,
+            filter,
+            &NavCosts::NONE,
+            start,
+            goal,
+            max_expansions,
+            out,
+        )
+    }
+
+    /// [`find`](Self::find) for an agent that also has hazard costs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_costed(
+        &mut self,
+        grid: &NavGrid,
+        filter: &NavFilter,
+        costs: &NavCosts,
+        start: (i32, i32),
+        goal: (i32, i32),
+        max_expansions: u32,
+        out: &mut Vec<(i32, i32)>,
+    ) -> PathOutcome {
+        let mut field = std::mem::take(&mut self.field);
+        grid.cost_field(filter, costs, &mut field);
+        let outcome = self.find_in_field(
+            grid.width,
+            grid.height,
+            &field,
+            start,
+            goal,
+            max_expansions,
+            out,
+        );
+        self.field = field;
+        outcome
+    }
+
+    /// The search itself, on a cost field from [`NavGrid::cost_field`] (0 is
+    /// blocked, everything else is what stepping onto that tile costs, at
+    /// least [`GROUND_COST`]). Costs are all it knows about the map, which is
+    /// what makes it fast: no tag tests, no bounds tests beyond one compare.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_in_field(
+        &mut self,
+        width: u32,
+        height: u32,
+        field: &[u16],
+        start: (i32, i32),
+        goal: (i32, i32),
+        max_expansions: u32,
+        out: &mut Vec<(i32, i32)>,
+    ) -> PathOutcome {
         out.clear();
         self.expansions = 0;
-        if !grid.walkable(start.0, start.1, filter) {
+        let (w, h) = (width as i32, height as i32);
+        debug_assert_eq!(field.len(), width as usize * height as usize);
+        let step_onto = |x: i32, y: i32| -> u32 {
+            if x < 0 || y < 0 || x >= w || y >= h {
+                0
+            } else {
+                u32::from(field[(y * w + x) as usize])
+            }
+        };
+        if step_onto(start.0, start.1) == 0 {
             return PathOutcome::BadStart;
         }
-        if !grid.walkable(goal.0, goal.1, filter) {
+        if step_onto(goal.0, goal.1) == 0 {
             return PathOutcome::BadGoal;
         }
         if start == goal {
@@ -264,9 +388,7 @@ impl PathFinder {
             return PathOutcome::Found { cost: 0 };
         }
 
-        let w = grid.width as i32;
-        let cells = grid.width as usize * grid.height as usize;
-        self.prepare(cells);
+        self.prepare(field.len());
         let gen_ = self.generation;
         let idx = |x: i32, y: i32| (y * w + x) as u32;
         let heuristic = |x: i32, y: i32| -> u32 {
@@ -307,15 +429,14 @@ impl PathFinder {
             let (x, y) = ((i as i32) % w, (i as i32) / w);
             for (k, &(dx, dy)) in NEIGHBOURS.iter().enumerate() {
                 let (nx, ny) = (x + dx, y + dy);
-                if !grid.walkable(nx, ny, filter) {
+                let tile_cost = step_onto(nx, ny);
+                if tile_cost == 0 {
                     continue;
                 }
                 let diagonal = k >= 4;
                 // No cutting corners: a diagonal step needs both straight
                 // neighbours it passes between to be walkable too.
-                if diagonal
-                    && !(grid.walkable(x + dx, y, filter) && grid.walkable(x, y + dy, filter))
-                {
+                if diagonal && (step_onto(x + dx, y) == 0 || step_onto(x, y + dy) == 0) {
                     continue;
                 }
                 let n = idx(nx, ny);
@@ -323,7 +444,6 @@ impl PathFinder {
                 if self.done[nu] == gen_ {
                     continue;
                 }
-                let tile_cost = u32::from(grid.cost[nu]);
                 let step = if diagonal {
                     tile_cost * 14 / 10
                 } else {
@@ -862,5 +982,237 @@ mod tests {
         raw_path(&tiles, &mut out);
         assert_eq!(out.len(), tiles.len() - 1);
         let _ = out;
+    }
+
+    // ---- Hazard costs ----
+
+    fn costed_step(g: &NavGrid, c: &NavCosts, to: (i32, i32), diagonal: bool) -> u32 {
+        let i = to.1 as usize * g.width as usize + to.0 as usize;
+        let cost = u32::from(g.cost[i]) + u32::from(c.extra(g.tags[i]));
+        if diagonal { cost * 14 / 10 } else { cost }
+    }
+
+    /// Dijkstra with hazard costs, written without the cost field.
+    fn costed_dijkstra(
+        g: &NavGrid,
+        f: &NavFilter,
+        c: &NavCosts,
+        s: (i32, i32),
+        goal: (i32, i32),
+    ) -> Option<u32> {
+        let (w, h) = (g.width as i32, g.height as i32);
+        let mut dist = vec![u32::MAX; (w * h) as usize];
+        let mut done = vec![false; (w * h) as usize];
+        dist[(s.1 * w + s.0) as usize] = 0;
+        loop {
+            let mut best: Option<usize> = None;
+            for i in 0..dist.len() {
+                if !done[i] && dist[i] != u32::MAX && best.is_none_or(|b| dist[i] < dist[b]) {
+                    best = Some(i);
+                }
+            }
+            let i = best?;
+            done[i] = true;
+            let (x, y) = (i as i32 % w, i as i32 / w);
+            if (x, y) == goal {
+                return Some(dist[i]);
+            }
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dy) == (0, 0) || !g.walkable(x + dx, y + dy, f) {
+                        continue;
+                    }
+                    let diagonal = dx != 0 && dy != 0;
+                    if diagonal && !(g.walkable(x + dx, y, f) && g.walkable(x, y + dy, f)) {
+                        continue;
+                    }
+                    let n = ((y + dy) * w + x + dx) as usize;
+                    let step = costed_step(g, c, (x + dx, y + dy), diagonal);
+                    if dist[i] + step < dist[n] {
+                        dist[n] = dist[i] + step;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cheapest_total_route_wins_not_the_shortest() {
+        // Three corridors between a start on the left and a goal on the right,
+        // each with one hazard tile in it:
+        //   top:    longest way round (4 rows out and back), no hazard
+        //   middle: short, FIRE (expensive)
+        //   bottom: medium (3 rows out and back), WATER (cheap)
+        const FIRE: usize = 0;
+        const WATER: usize = 1;
+        let mut g = NavGrid::new(13, 9);
+        for y in 0..9 {
+            for x in 0..13 {
+                g.set_open(x, y, false);
+            }
+        }
+        let open = |g: &mut NavGrid, x: i32, y: i32| g.set_open(x, y, true);
+        for x in 0..13 {
+            open(&mut g, x, 4); // middle corridor
+        }
+        for y in 0..9 {
+            open(&mut g, 0, y); // left connector
+            open(&mut g, 12, y); // right connector
+        }
+        for x in 0..13 {
+            open(&mut g, x, 0); // top corridor, 4 rows from the start
+            open(&mut g, x, 7); // bottom corridor
+        }
+        g.add_tags(6, 4, 1 << FIRE);
+        g.add_tags(6, 7, 1 << WATER);
+        let mut out = Vec::new();
+        let mut pf = PathFinder::new();
+        let run = |pf: &mut PathFinder, costs: NavCosts, out: &mut Vec<(i32, i32)>| {
+            pf.find_costed(&g, &NavFilter::ANY, &costs, (0, 4), (12, 4), u32::MAX, out);
+            let &(_, y) = out
+                .iter()
+                .find(|&&(x, _)| x == 6)
+                .expect("crosses column 6");
+            y
+        };
+        // No hazard costs: the straight middle corridor.
+        assert_eq!(run(&mut pf, NavCosts::NONE, &mut out), 4);
+        // Fire is dear (200), water is cheap (15): the wade (195) beats both
+        // the fire (320) and the clean detour (200).
+        let costs = NavCosts::NONE.with(FIRE, 200).with(WATER, 15);
+        assert_eq!(run(&mut pf, costs, &mut out), 7, "should wade, not burn");
+        // Make water dearer than the long way round: now the clean top corridor.
+        let costs = NavCosts::NONE.with(FIRE, 200).with(WATER, 250);
+        assert_eq!(
+            run(&mut pf, costs, &mut out),
+            0,
+            "should take the hazard-free route"
+        );
+        // A mild fire cost does not justify a detour.
+        let costs = NavCosts::NONE.with(FIRE, 20).with(WATER, 250);
+        assert_eq!(
+            run(&mut pf, costs, &mut out),
+            4,
+            "a cheap hazard is worth crossing"
+        );
+    }
+
+    #[test]
+    fn a_tile_costs_its_worst_hazard_not_the_sum() {
+        let c = NavCosts::NONE.with(0, 30).with(1, 50).with(2, 10);
+        assert_eq!(c.extra(0), 0);
+        assert_eq!(c.extra(0b001), 30);
+        assert_eq!(c.extra(0b011), 50);
+        assert_eq!(c.extra(0b111), 50);
+        assert_eq!(
+            NavCosts::NONE.with(40, 9),
+            NavCosts::NONE,
+            "out of range is ignored"
+        );
+        assert_eq!(c.get(1), 50);
+        assert_eq!(c.get(99), 0);
+    }
+
+    #[test]
+    fn forbidden_still_beats_costly() {
+        // The only way across is a tag that is both costed and denied.
+        let mut g = NavGrid::new(5, 1);
+        g.add_tags(2, 0, 1);
+        let mut out = Vec::new();
+        let costs = NavCosts::NONE.with(0, 5);
+        let r = PathFinder::new().find_costed(
+            &g,
+            &NavFilter { allow: 0, deny: 1 },
+            &costs,
+            (0, 0),
+            (4, 0),
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::NoPath);
+        let r = PathFinder::new().find_costed(
+            &g,
+            &NavFilter::ANY,
+            &costs,
+            (0, 0),
+            (4, 0),
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::Found { cost: 10 * 4 + 5 });
+    }
+
+    #[test]
+    fn matches_dijkstra_with_random_hazard_costs() {
+        let mut rng = Lcg(2026);
+        let mut pf = PathFinder::new();
+        let mut out = Vec::new();
+        let (mut found, mut detours) = (0, 0);
+        for case in 0..300 {
+            let g = random_grid(&mut rng, 13, 11, 22);
+            let costs = NavCosts::NONE
+                .with(0, rng.below(60) as u8)
+                .with(1, rng.below(120) as u8)
+                .with(2, rng.below(30) as u8);
+            let filter = if case % 3 == 0 {
+                NavFilter { allow: 0, deny: 4 }
+            } else {
+                NavFilter::ANY
+            };
+            let s = (rng.below(13) as i32, rng.below(11) as i32);
+            let t = (rng.below(13) as i32, rng.below(11) as i32);
+            let r = pf.find_costed(&g, &filter, &costs, s, t, u32::MAX, &mut out);
+            match r {
+                PathOutcome::Found { cost } => {
+                    found += 1;
+                    assert_eq!(
+                        costed_dijkstra(&g, &filter, &costs, s, t),
+                        Some(cost),
+                        "case {case}"
+                    );
+                    // The route's own cost, summed step by step, is what was reported.
+                    let sum: u32 = out
+                        .windows(2)
+                        .map(|p| {
+                            costed_step(&g, &costs, p[1], p[0].0 != p[1].0 && p[0].1 != p[1].1)
+                        })
+                        .sum();
+                    assert_eq!(sum, cost, "case {case}");
+                    // Did the hazards change the answer compared with ignoring them?
+                    let mut plain = Vec::new();
+                    pf.find(&g, &filter, s, t, u32::MAX, &mut plain);
+                    detours += usize::from(plain != out);
+                }
+                PathOutcome::NoPath => assert_eq!(costed_dijkstra(&g, &filter, &costs, s, t), None),
+                _ => {}
+            }
+        }
+        assert!(found > 100, "weak test: {found}");
+        assert!(
+            detours > 10,
+            "weak test: hazards changed only {detours} routes"
+        );
+    }
+
+    #[test]
+    fn a_kept_cost_field_gives_the_same_answers_as_building_one_each_time() {
+        let mut rng = Lcg(5);
+        let g = random_grid(&mut rng, 20, 20, 25);
+        let costs = NavCosts::NONE.with(0, 40).with(1, 15);
+        let filter = NavFilter { allow: 0, deny: 4 };
+        let mut field = Vec::new();
+        g.cost_field(&filter, &costs, &mut field);
+        assert_eq!(field.len(), 400);
+        assert!(field.iter().all(|&c| c == 0 || c >= u16::from(GROUND_COST)));
+        let mut pf = PathFinder::new();
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for _ in 0..60 {
+            let s = (rng.below(20) as i32, rng.below(20) as i32);
+            let t = (rng.below(20) as i32, rng.below(20) as i32);
+            let r1 = pf.find_costed(&g, &filter, &costs, s, t, u32::MAX, &mut a);
+            let r2 = pf.find_in_field(20, 20, &field, s, t, u32::MAX, &mut b);
+            assert_eq!(r1, r2);
+            assert_eq!(a, b);
+        }
     }
 }

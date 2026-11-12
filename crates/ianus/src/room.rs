@@ -11,7 +11,7 @@ use ianus_sim::{Body, SUBUNITS_PER_TILE, Vec2i};
 use crate::body::{Controlled, SimBody};
 use crate::collide::{Collider, ColliderIndex, SolidMap, Touching, WorldSettings};
 use crate::input::MoveIntent;
-use crate::nav::{NavMap, NavTags, agent_from_def};
+use crate::nav::{NavFields, NavMap, NavTags, agent_from_def};
 use crate::objects::ObjectSchedule;
 use crate::play::PlayMode;
 use crate::tick::{ReplayMode, SimControl, SimRng, Tick, TickInput};
@@ -125,6 +125,7 @@ pub fn load_room(world: &mut World, room: Room) -> Result<Vec<Problem>, LoadErro
 
     let solid_map = SolidMap::from_room(&room);
     world.insert_resource(NavMap::from_room(&room, &solid_map.0));
+    world.insert_resource(NavFields::default());
     world.insert_resource(solid_map);
     world.insert_resource(ColliderIndex::new(room.width, room.height));
     world.insert_resource(Touching::default());

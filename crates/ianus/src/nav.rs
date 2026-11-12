@@ -32,9 +32,9 @@ use bevy_app::{App, FixedUpdate};
 use bevy_ecs::prelude::*;
 use ianus_objects::{AgentTarget, Kind, Room};
 use ianus_sim::{
-    Body, Footprint, MoveInput, NavFilter, NavGrid, PathFinder, PathOutcome, SUBUNITS_PER_TILE,
-    Solids, Vec2i, raw_path, segment_clear, smooth_path, step_body_max, step_body_solid_max,
-    tile_of,
+    Body, Footprint, GROUND_COST, MoveInput, NavCosts, NavFilter, NavGrid, PathFinder, PathOutcome,
+    SUBUNITS_PER_TILE, Solids, Vec2i, raw_path, segment_clear, smooth_path, step_body_max,
+    step_body_solid_max, tile_of,
 };
 
 use crate::body::{Controlled, SimBody, step_controlled};
@@ -93,6 +93,9 @@ pub struct NavAgent {
     pub target: NavTarget,
     /// What it may walk on.
     pub filter: NavFilter,
+    /// What stepping on each kind of tile costs it, beyond the tile's own cost.
+    /// The agent takes the cheapest total route.
+    pub costs: NavCosts,
     /// Top speed on one axis, subunits per tick. `step_body` speeds are 341
     /// (about 5 tiles a second); see [`speed_from_tiles_per_second`].
     pub max_speed: i32,
@@ -106,6 +109,7 @@ impl Default for NavAgent {
         Self {
             target: NavTarget::None,
             filter: NavFilter::ANY,
+            costs: NavCosts::NONE,
             max_speed: ianus_sim::MAX_SPEED,
             stop_distance: SUBUNITS_PER_TILE,
         }
@@ -151,6 +155,7 @@ pub struct NavPath {
     map_version: u64,
     /// What the agent was allowed to walk on when this route was planned.
     filter: NavFilter,
+    costs: NavCosts,
     replan: bool,
     raw: bool,
     stuck_ticks: u32,
@@ -166,9 +171,10 @@ impl NavPath {
         &self.waypoints[self.next.min(self.waypoints.len())..]
     }
 
-    fn fail(&mut self, goal_tile: (i32, i32), version: u64, filter: NavFilter) {
+    fn fail(&mut self, goal_tile: (i32, i32), version: u64, filter: NavFilter, costs: NavCosts) {
         self.status = NavStatus::NoPath;
         self.filter = filter;
+        self.costs = costs;
         self.waypoints.clear();
         self.next = 0;
         self.goal_tile = goal_tile;
@@ -252,10 +258,52 @@ pub(crate) fn agent_from_def(room: &Room, def: &ianus_objects::ObjectDef) -> Opt
             allow: room.tag_mask(&agent.allow),
             deny: room.tag_mask(&agent.avoid),
         },
+        costs: agent.costs.iter().fold(NavCosts::NONE, |costs, tc| {
+            match room.nav_tags.iter().position(|t| *t == tc.tag) {
+                Some(i) => costs.with(i, tc.cost),
+                None => costs,
+            }
+        }),
         max_speed: speed_from_tiles_per_second(speed),
         stop_distance: (i64::from(agent.stop_distance) * i64::from(SUBUNITS_PER_TILE) / 100)
             .min(i64::from(i32::MAX)) as i32,
     })
+}
+
+/// Cost fields, one per kind of agent (walk rules plus hazard costs), kept for
+/// as long as the nav map does not change. Flattening the map into a plain
+/// array of step costs is the expensive part of getting ready to search, so it
+/// is done once per kind of agent, not once per search.
+#[derive(Resource, Default)]
+pub(crate) struct NavFields {
+    version: u64,
+    entries: Vec<(NavFilter, NavCosts, Vec<u16>)>,
+}
+
+impl NavFields {
+    /// Most kinds of agent kept at once; more than this and the cache starts over.
+    const MAX_KINDS: usize = 64;
+
+    fn get(&mut self, nav: &NavMap, filter: &NavFilter, costs: &NavCosts) -> &[u16] {
+        if self.version != nav.version || self.entries.len() >= Self::MAX_KINDS {
+            self.entries.clear();
+            self.version = nav.version;
+        }
+        let at = match self
+            .entries
+            .iter()
+            .position(|(f, c, _)| f == filter && c == costs)
+        {
+            Some(i) => i,
+            None => {
+                let mut field = Vec::new();
+                nav.grid.cost_field(filter, costs, &mut field);
+                self.entries.push((*filter, *costs, field));
+                self.entries.len() - 1
+            }
+        };
+        &self.entries[at].2
+    }
 }
 
 /// Search buffers shared by every agent.
@@ -267,16 +315,18 @@ struct NavScratch {
 }
 
 pub(crate) fn plugin(app: &mut App) {
-    app.init_resource::<NavScratch>().add_systems(
-        FixedUpdate,
-        (
-            rebuild_nav.in_set(IanusSet::World).after(CollisionRebuilt),
-            (track_targets, plan_paths, step_agents)
-                .chain()
-                .in_set(IanusSet::Sim)
-                .after(step_controlled),
-        ),
-    );
+    app.init_resource::<NavScratch>()
+        .init_resource::<NavFields>()
+        .add_systems(
+            FixedUpdate,
+            (
+                rebuild_nav.in_set(IanusSet::World).after(CollisionRebuilt),
+                (track_targets, plan_paths, step_agents)
+                    .chain()
+                    .in_set(IanusSet::Sim)
+                    .after(step_controlled),
+            ),
+        );
 }
 
 /// Forget every agent's route (not its target). Called by Stop, Restart and
@@ -389,6 +439,7 @@ fn plan_paths(
     nav: Option<Res<NavMap>>,
     solids: Option<Res<SolidMap>>,
     mut scratch: ResMut<NavScratch>,
+    mut fields: ResMut<NavFields>,
     mut agents: PlanQuery,
 ) {
     let (Some(nav), Some(solids)) = (nav, solids) else {
@@ -411,6 +462,7 @@ fn plan_paths(
             || path.goal_tile != goal_tile
             || path.map_version != nav.version
             || path.filter != agent.filter
+            || path.costs != agent.costs
             || path.replan;
         if !stale {
             continue;
@@ -420,25 +472,36 @@ fn plan_paths(
         let start = grid.nearest_walkable(start_tile, &agent.filter, 2);
         let goal = grid.nearest_walkable(goal_tile, &agent.filter, NEAREST_RADIUS);
         let (Some(start), Some(goal)) = (start, goal) else {
-            path.fail(goal_tile, nav.version, agent.filter);
+            path.fail(goal_tile, nav.version, agent.filter, agent.costs);
             continue;
         };
-        let outcome = scratch.finder.find(
-            grid,
-            &agent.filter,
+        let field = fields.get(&nav, &agent.filter, &agent.costs);
+        let outcome = scratch.finder.find_in_field(
+            grid.width(),
+            grid.height(),
+            field,
             start,
             goal,
             MAX_EXPANSIONS,
             &mut scratch.tiles,
         );
         if !matches!(outcome, PathOutcome::Found { .. }) {
-            path.fail(goal_tile, nav.version, agent.filter);
+            path.fail(goal_tile, nav.version, agent.filter, agent.costs);
             continue;
         }
 
         let fp = collider.map_or(Footprint::DEFAULT, |c| c.footprint);
-        let filter = agent.filter;
-        let tile_ok = |x: i32, y: i32| grid.walkable(x, y, &filter);
+        // A straight leg may only cross plain ground. The search may have
+        // gone out of its way to avoid a costly tile, and cutting across it to
+        // save a corner would undo that.
+        let (gw, gh) = (grid.width() as i32, grid.height() as i32);
+        let tile_ok = |x: i32, y: i32| {
+            x >= 0
+                && y >= 0
+                && x < gw
+                && y < gh
+                && field[(y * gw + x) as usize] == u16::from(GROUND_COST)
+        };
         if path.raw {
             raw_path(&scratch.tiles, &mut scratch.legs);
         } else {
@@ -480,6 +543,7 @@ fn plan_paths(
         path.goal_tile = goal_tile;
         path.map_version = nav.version;
         path.filter = agent.filter;
+        path.costs = agent.costs;
         path.replan = false;
         path.stuck_ticks = 0;
         path.stuck_from = body.0.pos;
@@ -617,7 +681,7 @@ fn step_agents(nav: Option<Res<NavMap>>, solids: Option<Res<SolidMap>>, mut agen
                     path.replan = true;
                     if path.strikes >= MAX_STRIKES {
                         let (goal_tile, version) = (path.goal_tile, path.map_version);
-                        path.fail(goal_tile, version, agent.filter);
+                        path.fail(goal_tile, version, agent.filter, agent.costs);
                     }
                 }
             }

@@ -34,6 +34,7 @@ fn arena(gaps: &[i32], hunter_speed: u32) -> Room {
         target: AgentTarget::Controlled,
         allow: vec![],
         avoid: vec!["water".into()],
+        costs: vec![],
         stop_distance: 100,
     });
     r.define(hunter);
@@ -702,4 +703,159 @@ fn in_random_mazes_an_agent_arrives_exactly_when_the_player_is_reachable() {
         arrived > 15 && cut_off > 5,
         "weak test: {arrived} reachable, {cut_off} cut off"
     );
+}
+
+// ---- Hazard costs: the cheapest total route wins ----
+
+use ianus_objects::TagCost;
+use ianus_sim::NavCosts;
+
+/// An arena where the wall at x = 9 has three gaps: row 2 (straight ahead,
+/// fire), row 4 (water) and row 7 (clean, the longest way round). The hunter
+/// starts at (3, 2) and the player stands at (15, 2). Fire is tag 2 and water
+/// is tag 0 ("water" was declared first by `arena`).
+fn three_gaps(fire: u8, water: u8) -> Room {
+    let mut room = arena(&[2, 4, 7], 5);
+    room.declare_tag("fire");
+    room.paint_tag("fire", WALL_X, 2);
+    room.paint_tag("water", WALL_X, 4);
+    let hunter = room
+        .objects
+        .iter_mut()
+        .find(|o| o.name == "Hunter")
+        .unwrap()
+        .agent
+        .as_mut()
+        .unwrap();
+    hunter.avoid.clear();
+    hunter.costs = vec![
+        TagCost {
+            tag: "fire".into(),
+            cost: fire,
+        },
+        TagCost {
+            tag: "water".into(),
+            cost: water,
+        },
+    ];
+    room
+}
+
+/// Which row of the wall the hunter went through, once it is through.
+fn gap_used(app: &mut App, name: &str) -> i32 {
+    let mut crossed = None;
+    run_until(app, 1200, |app| {
+        let b = body(app, name);
+        if crossed.is_none() && tile(&b).0 == WALL_X {
+            crossed = Some(tile(&b).1);
+        }
+        b.pos.x > (WALL_X + 2) * TILE
+    });
+    crossed.expect("never crossed the wall")
+}
+
+#[test]
+fn an_agent_takes_the_cheapest_total_route_through_hazards() {
+    // Route totals, roughly: fire gap 320, water gap 136 + water cost,
+    // clean gap 160. So a cheap-enough wade wins, a dear one does not.
+    let mut app = start(three_gaps(200, 15));
+    assert_eq!(gap_used(&mut app, "Hunter"), 4, "cheap water: wade through");
+
+    let mut app = start(three_gaps(200, 60));
+    assert_eq!(
+        gap_used(&mut app, "Hunter"),
+        7,
+        "dear water: the long clean way"
+    );
+
+    // Free hazards are not hazards: straight ahead, through the fire.
+    let mut app = start(three_gaps(0, 0));
+    assert_eq!(gap_used(&mut app, "Hunter"), 2);
+}
+
+#[test]
+fn changing_an_agents_costs_mid_walk_changes_its_route() {
+    let mut app = start(three_gaps(0, 0));
+    run(&mut app, 12); // it has set off along the free route
+    let e = entity(&mut app, "Hunter");
+    // Fire is suddenly deadly: it must turn round and go through the water.
+    let fire = NavCosts::NONE.with(2, 250).with(0, 15);
+    app.world_mut().get_mut::<NavAgent>(e).unwrap().costs = fire;
+    assert_eq!(gap_used(&mut app, "Hunter"), 4);
+}
+
+#[test]
+fn agents_with_different_costs_do_not_share_a_cost_field() {
+    let mut room = three_gaps(200, 15);
+    // A second hunter, same walk rules, but water is dear for it.
+    let mut second = room
+        .objects
+        .iter()
+        .find(|o| o.name == "Hunter")
+        .unwrap()
+        .clone();
+    second.name = "Cautious".into();
+    second.agent.as_mut().unwrap().costs = vec![
+        TagCost {
+            tag: "fire".into(),
+            cost: 200,
+        },
+        TagCost {
+            tag: "water".into(),
+            cost: 60,
+        },
+    ];
+    room.define(second);
+    room.place("Cautious", 3, 3);
+    let mut app = start(room);
+    let (mut bold, mut careful) = (None, None);
+    run_until(&mut app, 1500, |app| {
+        for (name, slot) in [("Hunter", &mut bold), ("Cautious", &mut careful)] {
+            let b = body(app, name);
+            if slot.is_none() && tile(&b).0 == WALL_X {
+                *slot = Some(tile(&b).1);
+            }
+        }
+        bold.is_some() && careful.is_some()
+    });
+    assert_eq!(bold, Some(4), "the bold one wades");
+    assert_eq!(careful, Some(7), "the cautious one goes round");
+}
+
+#[test]
+fn costs_in_the_room_file_reach_the_agent() {
+    let room = three_gaps(200, 15);
+    let text = room.to_text();
+    assert!(text.contains("costs"));
+    let mut app = test_app(1.0);
+    load_room(app.world_mut(), Room::from_text(&text).unwrap()).unwrap();
+    let e = entity(&mut app, "Hunter");
+    let agent = app.world().get::<NavAgent>(e).unwrap();
+    // Tags were declared: water (0), road (1), fire (2).
+    assert_eq!(agent.costs, NavCosts::NONE.with(2, 200).with(0, 15));
+}
+
+#[test]
+fn a_straight_leg_never_cuts_across_a_hazard_the_search_went_round() {
+    // An open room with one fire tile on the direct line between the agents.
+    let mut room = arena(&[1, 2, 3, 4, 5, 6, 7], 5);
+    room.declare_tag("fire");
+    room.paint_tag("fire", WALL_X, 2);
+    let h = room
+        .objects
+        .iter_mut()
+        .find(|o| o.name == "Hunter")
+        .unwrap();
+    let agent = h.agent.as_mut().unwrap();
+    agent.avoid.clear();
+    agent.costs = vec![TagCost {
+        tag: "fire".into(),
+        cost: 250,
+    }];
+    let mut app = start(room);
+    run_until(&mut app, 900, |app| {
+        let b = body(app, "Hunter");
+        assert_ne!(tile(&b), (WALL_X, 2), "walked through the fire");
+        status(app) == NavStatus::Arrived
+    });
 }

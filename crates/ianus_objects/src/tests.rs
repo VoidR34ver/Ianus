@@ -521,6 +521,7 @@ fn chaser() -> ObjectDef {
         target: AgentTarget::Controlled,
         allow: vec![],
         avoid: vec!["water".into()],
+        costs: vec![],
         stop_distance: 150,
     });
     d
@@ -718,4 +719,61 @@ fn the_shipped_chase_room_parses_and_is_clean() {
     // Saving what we loaded gives the file back, so the file is what the
     // engine itself would write.
     assert_eq!(room.to_text(), text);
+}
+
+#[test]
+fn agent_tag_costs_round_trip_and_are_checked() {
+    let mut r = room_with_hunter();
+    let hunter = r.objects.iter_mut().find(|o| o.name == "Hunter").unwrap();
+    hunter.agent.as_mut().unwrap().avoid.clear();
+    hunter.agent.as_mut().unwrap().costs = vec![TagCost {
+        tag: "water".into(),
+        cost: 40,
+    }];
+    assert_eq!(r.validate(), vec![], "{:?}", messages(&r));
+    let text = r.to_text();
+    assert!(text.contains("costs") && text.contains("40"));
+    assert_eq!(Room::from_text(&text).unwrap(), r);
+    // An agent without costs does not print the field at all.
+    assert!(!room_with_hunter().to_text().contains("costs"));
+}
+
+#[test]
+fn bad_tag_costs_are_reported() {
+    let mut r = room_with_hunter();
+    r.objects
+        .iter_mut()
+        .find(|o| o.name == "Hunter")
+        .unwrap()
+        .agent
+        .as_mut()
+        .unwrap()
+        .costs = vec![
+        TagCost {
+            tag: "watr".into(),
+            cost: 30,
+        },
+        TagCost {
+            tag: "road".into(),
+            cost: 0,
+        },
+        TagCost {
+            tag: "water".into(),
+            cost: 20,
+        },
+        TagCost {
+            tag: "water".into(),
+            cost: 25,
+        },
+    ];
+    let m = messages(&r);
+    assert!(
+        m.iter()
+            .any(|s| s.contains("'watr'") && s.contains("Did you mean 'water'")),
+        "{m:?}"
+    );
+    assert!(m.iter().any(|s| s.contains("cost of 0 on 'road'")), "{m:?}");
+    assert!(m.iter().any(|s| s.contains("also avoids it")), "{m:?}"); // the avoid list has water
+    assert!(m.iter().any(|s| s.contains("more than once")), "{m:?}");
+    assert!(!r.is_playable(), "the unknown tag is an error");
 }
