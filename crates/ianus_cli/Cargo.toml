@@ -1,0 +1,16 @@
+[package]
+name = "ianus_cli"
+description = "Ianus command-line tool: validate rooms, run them headless, verify replays"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Headless on purpose: only the small runtime crates, no window or renderer.
+# This is what scripts and CI call, and it can never open a window.
+[dependencies]
+ianus.workspace = true
+ianus_objects.workspace = true
+ianus_sim.workspace = true
+bevy_app = "0.20"
+bevy_ecs = "0.20"
+bevy_time = "0.20"

@@ -3276,6 +3276,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ianus_cli"
+version = "0.0.1"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "bevy_time",
+ "ianus",
+ "ianus_objects",
+ "ianus_sim",
+]
+
+[[package]]
 name = "ianus_engine"
 version = "0.0.1"
 dependencies = [

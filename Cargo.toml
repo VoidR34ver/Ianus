@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ianus_sim", "crates/ianus", "crates/ianus_engine", "crates/ianus_objects"]
+members = ["crates/ianus_sim", "crates/ianus", "crates/ianus_engine", "crates/ianus_objects", "crates/ianus_cli"]
 
 [workspace.package]
 version = "0.0.1"
