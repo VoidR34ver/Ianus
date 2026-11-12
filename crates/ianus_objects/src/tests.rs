@@ -704,3 +704,18 @@ fn an_agent_with_nothing_to_chase_is_a_warning() {
     let m = messages(&r);
     assert!(m.iter().any(|s| s.contains("none is placed")), "{m:?}");
 }
+
+/// The pathfinding demo room, like the cellar, must stay loadable and clean.
+/// Regenerate with `cargo run -p ianus_objects --example write_chase`.
+#[test]
+fn the_shipped_chase_room_parses_and_is_clean() {
+    let text = include_str!("../../../rooms/chase.room");
+    let room = Room::from_text(text).expect("rooms/chase.room must parse");
+    assert_eq!(room.name, "Chase");
+    assert_eq!(room.validate(), vec![], "chase room has problems");
+    assert!(room.objects.iter().filter(|o| o.agent.is_some()).count() >= 2);
+    assert_eq!(room.nav_tags, vec!["water".to_string()]);
+    // Saving what we loaded gives the file back, so the file is what the
+    // engine itself would write.
+    assert_eq!(room.to_text(), text);
+}

@@ -13,6 +13,7 @@ use ianus_sim::{Body, Replay};
 
 use crate::body::{PrevPos, SimBody};
 use crate::input::MoveIntent;
+use crate::nav::reset_agents;
 use crate::room::PlacedObject;
 use crate::tick::{TickInput, begin_playback, begin_recording};
 
@@ -55,6 +56,7 @@ pub fn restart_world(world: &mut World) -> Result<(), RegisteredSystemError> {
     }
     world.insert_resource(MoveIntent::default());
     world.insert_resource(TickInput::default());
+    reset_agents(world);
     // Without this a restarted body would visibly glide from where it was.
     let mut bodies = world.query::<(&SimBody, &mut PrevPos)>();
     for (body, mut prev) in bodies.iter_mut(world) {

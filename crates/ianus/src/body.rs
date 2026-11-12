@@ -62,7 +62,7 @@ fn record_previous_positions(mut bodies: Query<(&SimBody, &mut PrevPos), MovedNo
 }
 
 /// One simulation step for the player-controlled entity.
-fn step_controlled(
+pub(crate) fn step_controlled(
     tick_input: Res<TickInput>,
     solid: Option<Res<SolidMap>>,
     mut bodies: Query<(&mut SimBody, &mut PrevPos, Option<&Collider>), With<Controlled>>,

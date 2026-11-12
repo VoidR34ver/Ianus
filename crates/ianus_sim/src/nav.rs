@@ -513,7 +513,7 @@ mod tests {
                     best = Some(i);
                 }
             }
-            let Some(i) = best else { return None };
+            let i = best?;
             done[i] = true;
             let (x, y) = (i as i32 % w, i as i32 / w);
             if (x, y) == goal {

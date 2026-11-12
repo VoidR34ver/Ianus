@@ -177,12 +177,23 @@ pub struct Touching(pub Vec<Entity>);
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WorldSettings(pub ianus_objects::WorldRules);
 
+/// The World-phase collision rebuild. Things that depend on its result (the
+/// nav map) order themselves after this set; they cannot order against the
+/// function itself because it is registered twice.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CollisionRebuilt;
+
 pub(crate) fn plugin(app: &mut App) {
     app.init_resource::<Touching>()
         .init_resource::<WorldSettings>()
         // Rebuilt in the World phase, before anything moves, so a wall that was
         // dragged in the editor is already in place on the first tick of Play.
-        .add_systems(FixedUpdate, rebuild_collision.in_set(IanusSet::World))
+        .add_systems(
+            FixedUpdate,
+            rebuild_collision
+                .in_set(IanusSet::World)
+                .in_set(CollisionRebuilt),
+        )
         // Again at the start of Detect, so anything that moved or vanished
         // during Sim is seen by this tick's Touching, not the next one's.
         // Each registration tracks its own change ticks, so neither misses
@@ -197,12 +208,12 @@ pub(crate) fn plugin(app: &mut App) {
 }
 
 type MovedColliders<'w, 's> =
-    Query<'w, 's, (), (With<Collider>, Without<Controlled>, Changed<SimBody>)>;
+    Query<'w, 's, &'static Collider, (Without<Controlled>, Changed<SimBody>)>;
 
 /// Rebuild the solid map and the collider index, but only when something that
 /// could change them moved (or a room just loaded). Almost every tick nothing
 /// did, so this is a cheap emptiness check.
-fn rebuild_collision(
+pub(crate) fn rebuild_collision(
     moved: MovedColliders,
     mut removed: RemovedComponents<Collider>,
     colliders: Query<(Entity, &Collider, &SimBody), Without<Controlled>>,
@@ -214,20 +225,30 @@ fn rebuild_collision(
     // nothing that `Changed` can see, so ask for those separately. (Always
     // drain the reader so old removals do not trigger a rebuild later.)
     let vanished = removed.read().count() > 0;
+    // Only a *solid* collider moving changes what stops things. A non-solid
+    // one (a walking creature) only changes the collider index, so the solid
+    // map, and everything derived from it such as the nav map, stays put.
+    let solid_moved = moved.iter().any(|c| c.solid);
     if moved.is_empty() && !vanished {
         return;
     }
-    let (Some(room), Some(index), Some(solids)) =
-        (room, index.as_deref_mut(), solids.as_deref_mut())
-    else {
+    // `solids.is_some()`, not `as_deref_mut()`: taking a mutable reference
+    // marks the resource changed, and everything downstream (the nav map)
+    // would then redo its work every time any collider moved.
+    let (Some(room), Some(index), true) = (room, index.as_deref_mut(), solids.is_some()) else {
         return;
     };
     index.rebuild(colliders.iter().map(|(e, c, b)| (e, c.aabb_at(b.0.pos))));
-    *solids = SolidMap::build(
-        room.0.width,
-        room.0.height,
-        colliders.iter().map(|(_, c, b)| (*c, b.0.pos)),
-    );
+    // A vanished collider may have been solid; there is no way to ask.
+    if (solid_moved || vanished)
+        && let Some(solids) = solids.as_deref_mut()
+    {
+        *solids = SolidMap::build(
+            room.0.width,
+            room.0.height,
+            colliders.iter().map(|(_, c, b)| (*c, b.0.pos)),
+        );
+    }
 }
 
 fn detect_touching(
