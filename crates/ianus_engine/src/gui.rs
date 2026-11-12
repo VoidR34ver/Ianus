@@ -115,9 +115,7 @@ pub(crate) fn gui_system(
     );
 
     let top = egui::Panel::top("toolbar")
-        .show(&mut root, |ui| {
-            toolbar(ui, &data, &mut actions, &mut editor)
-        })
+        .show(&mut root, |ui| toolbar(ui, &data, &mut actions))
         .response
         .rect
         .height();
@@ -147,27 +145,33 @@ pub(crate) fn gui_system(
         .rect
         .height();
 
+    editor.show(&ctx);
+
+    if *tab == EditorTab::Main {
+        // Main is the asset tree. The camera keeps running under the opaque panel.
+        egui::CentralPanel::default().show(&mut root, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if editor.resources(ui, &mut actions) {
+                    *tab = EditorTab::Rooms;
+                }
+            })
+        });
+        return Ok(());
+    }
+
     let left = egui::Panel::left("scene")
         .resizable(true)
         .default_size(210.0)
         .show(&mut root, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut editor.open, false, "Scene");
-                ui.selectable_value(&mut editor.open, true, "Assets");
-            });
-            ui.separator();
-            if editor.open {
-                editor.resources(ui, &mut actions);
-            } else {
-                scene_panel(
-                    ui,
-                    &data,
-                    &mut selection,
-                    &bodies,
-                    &placed.as_readonly(),
-                    &mut actions,
-                )
-            }
+            room_switcher(ui, &data, &mut actions);
+            scene_panel(
+                ui,
+                &data,
+                &mut selection,
+                &bodies,
+                &placed.as_readonly(),
+                &mut actions,
+            )
         })
         .response
         .rect
@@ -197,14 +201,6 @@ pub(crate) fn gui_system(
         .response
         .rect
         .width();
-
-    editor.show(&ctx);
-
-    if *tab == EditorTab::Rooms {
-        // Covers the game view; the camera keeps its viewport underneath.
-        egui::CentralPanel::default().show(&mut root, |ui| rooms_tab(ui, &data, &mut actions));
-        return Ok(());
-    }
 
     // The game gets the space the panels left over.
     let size = UVec2::new(window.physical_width(), window.physical_height());
@@ -260,38 +256,39 @@ pub(crate) fn gui_system(
 /// Which main screen is showing.
 #[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum EditorTab {
-    /// Node tree, game view, inspector.
+    /// The asset tree: scripts and rooms.
     #[default]
     Main,
-    /// All room files; open one to edit it on Main.
+    /// The scene view of the open room: scene list, game view, inspector.
     Rooms,
 }
 
-fn rooms_tab(ui: &mut egui::Ui, data: &GuiData, actions: &mut Actions) {
-    ui.heading("Rooms");
-    ui.weak(format!("Files in {}/", crate::rooms::ROOMS_DIR));
-    ui.separator();
-    let rooms = crate::rooms::list_rooms();
-    if rooms.is_empty() {
-        ui.weak("No .room files found.");
-    }
-    for path in rooms {
-        let name = path
-            .file_name()
-            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        let current = data.room_file.as_ref().is_some_and(|f| f.path() == path);
-        ui.horizontal(|ui| {
-            ui.label(&name);
-            if current {
-                ui.weak("(open)");
-            } else if ui.small_button("Open").clicked() {
-                actions.push(Action::OpenRoom(path));
+/// Pick which room the scene view shows.
+fn room_switcher(ui: &mut egui::Ui, data: &GuiData, actions: &mut Actions) {
+    let current = data
+        .room_file
+        .as_ref()
+        .and_then(|f| {
+            f.path()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "(no room)".into());
+    egui::ComboBox::from_label("Room")
+        .selected_text(current.clone())
+        .show_ui(ui, |ui| {
+            for path in crate::rooms::list_rooms() {
+                let name = path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                if ui.selectable_label(name == current, &name).clicked() && name != current {
+                    actions.push(Action::OpenRoom(path));
+                }
             }
         });
-    }
 }
 
-fn toolbar(ui: &mut egui::Ui, data: &GuiData, actions: &mut Actions, editor: &mut CodeEditor) {
+fn toolbar(ui: &mut egui::Ui, data: &GuiData, actions: &mut Actions) {
     ui.horizontal(|ui| {
         ui.add_space(4.0);
         let paused = data.control.paused;
@@ -374,13 +371,6 @@ fn toolbar(ui: &mut egui::Ui, data: &GuiData, actions: &mut Actions, editor: &mu
             .clicked()
         {
             actions.push(Action::PlaySavedReplay);
-        }
-        if ui
-            .selectable_label(editor.open, "Resources")
-            .on_hover_text("Open the code editor window (scripts/ folder)")
-            .clicked()
-        {
-            editor.toggle();
         }
         if ui
             .add_enabled(!recording && !playing, egui::Button::new("Restart").small())

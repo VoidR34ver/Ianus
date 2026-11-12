@@ -76,10 +76,6 @@ impl CodeEditor {
         me
     }
 
-    pub fn toggle(&mut self) {
-        self.open = !self.open;
-    }
-
     /// Open a file in its own window (nothing happens if it is already open).
     pub fn open_file(&mut self, path: &Path) {
         if self.docs.iter().any(|d| d.path == path) {
@@ -146,7 +142,9 @@ impl CodeEditor {
 
     /// The resource tree: a Scripts folder; double-click opens a script.
     /// The Assets view, docked in the left panel.
-    pub(crate) fn resources(&mut self, ui: &mut egui::Ui, actions: &mut Actions) {
+    /// Returns true when a room was opened.
+    pub(crate) fn resources(&mut self, ui: &mut egui::Ui, actions: &mut Actions) -> bool {
+        let mut room_opened = false;
         ui.heading("Assets");
         egui::CollapsingHeader::new("Scripts")
             .default_open(true)
@@ -181,6 +179,7 @@ impl CodeEditor {
                         .double_clicked()
                     {
                         actions.push(Action::OpenRoom(path));
+                        room_opened = true;
                     }
                 }
             });
@@ -196,6 +195,7 @@ impl CodeEditor {
         if !self.message.is_empty() {
             ui.weak(&self.message);
         }
+        room_opened
     }
 }
 
