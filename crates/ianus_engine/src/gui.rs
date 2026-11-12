@@ -151,14 +151,23 @@ pub(crate) fn gui_system(
         .resizable(true)
         .default_size(210.0)
         .show(&mut root, |ui| {
-            scene_panel(
-                ui,
-                &data,
-                &mut selection,
-                &bodies,
-                &placed.as_readonly(),
-                &mut actions,
-            )
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut editor.open, false, "Scene");
+                ui.selectable_value(&mut editor.open, true, "Assets");
+            });
+            ui.separator();
+            if editor.open {
+                editor.resources(ui, &mut actions);
+            } else {
+                scene_panel(
+                    ui,
+                    &data,
+                    &mut selection,
+                    &bodies,
+                    &placed.as_readonly(),
+                    &mut actions,
+                )
+            }
         })
         .response
         .rect
@@ -189,7 +198,7 @@ pub(crate) fn gui_system(
         .rect
         .width();
 
-    editor.show(&ctx, &mut actions);
+    editor.show(&ctx);
 
     if *tab == EditorTab::Rooms {
         // Covers the game view; the camera keeps its viewport underneath.

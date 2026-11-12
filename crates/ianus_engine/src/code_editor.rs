@@ -57,7 +57,7 @@ impl Doc {
 /// tree) and one floating code window per open script.
 #[derive(Resource, Debug, Default)]
 pub struct CodeEditor {
-    /// The Resources window.
+    /// Left panel shows the Assets tree instead of the Scene list.
     pub open: bool,
     docs: Vec<Doc>,
     new_name: String,
@@ -117,17 +117,7 @@ impl CodeEditor {
     }
 
     /// Draw the windows. Call every frame from the GUI system.
-    pub fn show(&mut self, ctx: &egui::Context, actions: &mut Actions) {
-        if self.open {
-            let mut open = true;
-            egui::Window::new("Resources")
-                .open(&mut open)
-                .default_size([200.0, 300.0])
-                .default_pos([240.0, 60.0])
-                .show(ctx, |ui| self.resources(ui, actions));
-            self.open = open;
-        }
-
+    pub fn show(&mut self, ctx: &egui::Context) {
         let mut closed = None;
         let mut message = None;
         for (i, doc) in self.docs.iter_mut().enumerate() {
@@ -155,7 +145,9 @@ impl CodeEditor {
     }
 
     /// The resource tree: a Scripts folder; double-click opens a script.
-    fn resources(&mut self, ui: &mut egui::Ui, actions: &mut Actions) {
+    /// The Assets view, docked in the left panel.
+    pub(crate) fn resources(&mut self, ui: &mut egui::Ui, actions: &mut Actions) {
+        ui.heading("Assets");
         egui::CollapsingHeader::new("Scripts")
             .default_open(true)
             .show(ui, |ui| {
