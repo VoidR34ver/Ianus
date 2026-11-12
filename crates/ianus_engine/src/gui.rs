@@ -26,6 +26,7 @@ use egui::{Align, Color32, Layout, Stroke, StrokeKind};
 use ianus::prelude::*;
 use ianus_sim::tile_of;
 
+use crate::code_editor::CodeEditor;
 use crate::navtools::{self, Brush, NavTools, RouteView};
 use crate::{
     Action, Actions, EngineCamera, EngineConfig, EngineStatus, GuiVisible, SPEEDS, Selection,
@@ -91,6 +92,7 @@ pub(crate) fn gui_system(
     mut nav_tools: ResMut<NavTools>,
     mut agents: Query<(Entity, &mut NavAgent, &NavPath)>,
     object_tags: Query<&NavTags>,
+    mut editor: ResMut<CodeEditor>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
     let scale_factor = window.scale_factor();
@@ -111,7 +113,9 @@ pub(crate) fn gui_system(
     );
 
     let top = egui::Panel::top("toolbar")
-        .show(&mut root, |ui| toolbar(ui, &data, &mut actions))
+        .show(&mut root, |ui| {
+            toolbar(ui, &data, &mut actions, &mut editor)
+        })
         .response
         .rect
         .height();
@@ -150,6 +154,7 @@ pub(crate) fn gui_system(
         .resizable(true)
         .default_size(260.0)
         .show(&mut root, |ui| {
+            // The inspector is taller than a small window, so it scrolls.
             egui::ScrollArea::vertical()
                 .id_salt("inspector_scroll")
                 .auto_shrink([false, false])
@@ -169,6 +174,8 @@ pub(crate) fn gui_system(
         .response
         .rect
         .width();
+
+    editor.show(&ctx);
 
     // The game gets the space the panels left over.
     let size = UVec2::new(window.physical_width(), window.physical_height());
@@ -221,7 +228,7 @@ pub(crate) fn gui_system(
     Ok(())
 }
 
-fn toolbar(ui: &mut egui::Ui, data: &GuiData, actions: &mut Actions) {
+fn toolbar(ui: &mut egui::Ui, data: &GuiData, actions: &mut Actions, editor: &mut CodeEditor) {
     ui.horizontal(|ui| {
         ui.add_space(4.0);
         let paused = data.control.paused;
@@ -304,6 +311,13 @@ fn toolbar(ui: &mut egui::Ui, data: &GuiData, actions: &mut Actions) {
             .clicked()
         {
             actions.push(Action::PlaySavedReplay);
+        }
+        if ui
+            .selectable_label(editor.open, "Code")
+            .on_hover_text("Open the code editor window (scripts/ folder)")
+            .clicked()
+        {
+            editor.toggle();
         }
         if ui
             .add_enabled(!recording && !playing, egui::Button::new("Restart").small())
