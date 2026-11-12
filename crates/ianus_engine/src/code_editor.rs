@@ -10,6 +10,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::Resource;
+
+use crate::{Action, Actions};
 use bevy_egui::egui;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId};
@@ -115,14 +117,14 @@ impl CodeEditor {
     }
 
     /// Draw the windows. Call every frame from the GUI system.
-    pub fn show(&mut self, ctx: &egui::Context) {
+    pub fn show(&mut self, ctx: &egui::Context, actions: &mut Actions) {
         if self.open {
             let mut open = true;
             egui::Window::new("Resources")
                 .open(&mut open)
                 .default_size([200.0, 300.0])
                 .default_pos([240.0, 60.0])
-                .show(ctx, |ui| self.resources(ui));
+                .show(ctx, |ui| self.resources(ui, actions));
             self.open = open;
         }
 
@@ -153,7 +155,7 @@ impl CodeEditor {
     }
 
     /// The resource tree: a Scripts folder; double-click opens a script.
-    fn resources(&mut self, ui: &mut egui::Ui) {
+    fn resources(&mut self, ui: &mut egui::Ui, actions: &mut Actions) {
         egui::CollapsingHeader::new("Scripts")
             .default_open(true)
             .show(ui, |ui| {
@@ -171,6 +173,22 @@ impl CodeEditor {
                         .double_clicked()
                     {
                         self.open_file(&path);
+                    }
+                }
+            });
+        egui::CollapsingHeader::new("Rooms")
+            .default_open(true)
+            .show(ui, |ui| {
+                for path in crate::rooms::list_rooms() {
+                    let name = path
+                        .file_name()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                    if ui
+                        .selectable_label(false, name)
+                        .on_hover_text("Double-click to open this room")
+                        .double_clicked()
+                    {
+                        actions.push(Action::OpenRoom(path));
                     }
                 }
             });

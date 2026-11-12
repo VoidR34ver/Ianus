@@ -20,6 +20,8 @@ pub enum Action {
     Stop,
     /// Load the room file again.
     ReloadRoom,
+    /// Switch to another room file and load it.
+    OpenRoom(std::path::PathBuf),
     /// Pause or resume. In edit mode this starts playing.
     TogglePause,
     /// Run exactly one tick (pauses first; enters play mode from edit mode).
@@ -86,6 +88,7 @@ pub(crate) fn apply_actions(world: &mut World) {
                     world.resource_mut::<EngineStatus>().say(message);
                 }
             }
+            Action::OpenRoom(path) => crate::rooms::open_room(world, &path),
             Action::TogglePause => {
                 // From edit mode, "resume" means "start playing".
                 if !play(world) {

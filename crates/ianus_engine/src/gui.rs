@@ -62,6 +62,7 @@ pub(crate) struct GuiData<'w> {
     play_mode: Res<'w, PlayMode>,
     room: Option<Res<'w, CurrentRoom>>,
     nav: Option<Res<'w, NavMap>>,
+    room_file: Option<Res<'w, crate::rooms::RoomFile>>,
 }
 
 type BodyQuery<'w, 's> = Query<
@@ -93,6 +94,7 @@ pub(crate) fn gui_system(
     mut agents: Query<(Entity, &mut NavAgent, &NavPath)>,
     object_tags: Query<&NavTags>,
     mut editor: ResMut<CodeEditor>,
+    mut tab: ResMut<EditorTab>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
     let scale_factor = window.scale_factor();
@@ -119,6 +121,18 @@ pub(crate) fn gui_system(
         .response
         .rect
         .height();
+
+    let tabs_h = egui::Panel::top("tabs")
+        .show(&mut root, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut *tab, EditorTab::Main, "Main");
+                ui.selectable_value(&mut *tab, EditorTab::Rooms, "Rooms");
+            });
+        })
+        .response
+        .rect
+        .height();
+    let top = top + tabs_h;
 
     let bottom = egui::Panel::bottom("simulation")
         .resizable(true)
@@ -175,7 +189,13 @@ pub(crate) fn gui_system(
         .rect
         .width();
 
-    editor.show(&ctx);
+    editor.show(&ctx, &mut actions);
+
+    if *tab == EditorTab::Rooms {
+        // Covers the game view; the camera keeps its viewport underneath.
+        egui::CentralPanel::default().show(&mut root, |ui| rooms_tab(ui, &data, &mut actions));
+        return Ok(());
+    }
 
     // The game gets the space the panels left over.
     let size = UVec2::new(window.physical_width(), window.physical_height());
@@ -226,6 +246,40 @@ pub(crate) fn gui_system(
     );
 
     Ok(())
+}
+
+/// Which main screen is showing.
+#[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum EditorTab {
+    /// Node tree, game view, inspector.
+    #[default]
+    Main,
+    /// All room files; open one to edit it on Main.
+    Rooms,
+}
+
+fn rooms_tab(ui: &mut egui::Ui, data: &GuiData, actions: &mut Actions) {
+    ui.heading("Rooms");
+    ui.weak(format!("Files in {}/", crate::rooms::ROOMS_DIR));
+    ui.separator();
+    let rooms = crate::rooms::list_rooms();
+    if rooms.is_empty() {
+        ui.weak("No .room files found.");
+    }
+    for path in rooms {
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let current = data.room_file.as_ref().is_some_and(|f| f.path() == path);
+        ui.horizontal(|ui| {
+            ui.label(&name);
+            if current {
+                ui.weak("(open)");
+            } else if ui.small_button("Open").clicked() {
+                actions.push(Action::OpenRoom(path));
+            }
+        });
+    }
 }
 
 fn toolbar(ui: &mut egui::Ui, data: &GuiData, actions: &mut Actions, editor: &mut CodeEditor) {
