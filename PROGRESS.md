@@ -4,7 +4,7 @@
 
 ## Snapshot
 
-- **2026-11-12 logic-skip review: found, fixed, tested (branch `claude/logic-skips-investigation-7vqgu5`, not merged to `main`).** Each fix has a test that was made to fail by breaking the fix once (10 of 10 went red). Golden hashes did not change. Counts and clippy for this branch are in the line below once the final run is recorded; the 161 figure further down is the old one.
+- **2026-11-12 logic-skip review: found, fixed, tested (branch `claude/logic-skips-investigation-7vqgu5`, not merged to `main`).** Each fix has a test that was made to fail by breaking the fix once (10 of 10 went red). Golden hashes did not change. **Verified on Linux (Rust 1.99.1) after the fixes: 172 tests pass (`ianus_sim` 71, `ianus` 49, `ianus_objects` 32, `ianus_engine` 20), clippy has zero warnings, rustfmt changes nothing, all examples build.** Golden hashes unchanged. The 161 figure further down is the old Windows count.
   - Despawned or collider-stripped walls kept blocking, and dead entities stayed in `Touching` and `DueObjects` (`Changed<SimBody>` cannot see removals; now also watches `RemovedComponents<Collider>`, and due objects are filtered for liveness).
   - Non-player movers were drawn at their old place (`PrevPos` only updated for the player; now set for every changed body at the start of a tick).
   - `Touching` was one tick late for anything that moved during `Sim` (collision structures are now also refreshed at the start of `Detect`; the cost is a second emptiness check per tick, and a second rebuild on ticks where something moved).

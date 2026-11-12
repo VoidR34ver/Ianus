@@ -47,13 +47,13 @@ pub(crate) fn plugin(app: &mut App) {
         );
 }
 
+type MovedNonPlayer = (Changed<SimBody>, Without<Controlled>);
+
 /// Anything other than the player that was moved by game logic during the last
 /// tick gets its "previous position" set to where it stood at the start of this
 /// one, so it is drawn sliding from there to where it is, not stuck at an old
 /// spot. The player does this for itself in [`step_controlled`].
-fn record_previous_positions(
-    mut bodies: Query<(&SimBody, &mut PrevPos), (Changed<SimBody>, Without<Controlled>)>,
-) {
+fn record_previous_positions(mut bodies: Query<(&SimBody, &mut PrevPos), MovedNonPlayer>) {
     for (body, mut prev) in &mut bodies {
         if prev.0 != body.0.pos {
             prev.0 = body.0.pos;
