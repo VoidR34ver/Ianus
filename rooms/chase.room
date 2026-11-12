@@ -1,0 +1,617 @@
+(
+    name: "Chase",
+    width: 24,
+    height: 14,
+    world: (
+        collision: true,
+        ob_tick_scale: 1,
+    ),
+    nav_tags: [
+        "water",
+    ],
+    objects: [
+        (
+            name: "Player",
+            ob_tick: 1,
+            collision: true,
+            solid: false,
+            hitbox: (
+                width: 75,
+                height: 75,
+                offset_x: 0,
+                offset_y: 0,
+            ),
+            kind: Entity(
+                controlled: true,
+                speed_tiles_per_s: 5,
+            ),
+        ),
+        (
+            name: "Nextbot",
+            ob_tick: 1,
+            collision: true,
+            solid: false,
+            hitbox: (
+                width: 75,
+                height: 75,
+                offset_x: 0,
+                offset_y: 0,
+            ),
+            agent: Some((
+                target: Controlled,
+                allow: [],
+                avoid: [
+                    "water",
+                ],
+                stop_distance: 100,
+            )),
+            kind: Entity(
+                controlled: false,
+                speed_tiles_per_s: 4,
+            ),
+        ),
+        (
+            name: "Wader",
+            ob_tick: 1,
+            collision: true,
+            solid: false,
+            hitbox: (
+                width: 75,
+                height: 75,
+                offset_x: 0,
+                offset_y: 0,
+            ),
+            agent: Some((
+                target: Controlled,
+                allow: [],
+                avoid: [],
+                stop_distance: 100,
+            )),
+            kind: Entity(
+                controlled: false,
+                speed_tiles_per_s: 3,
+            ),
+        ),
+        (
+            name: "Wall",
+            ob_tick: 0,
+            collision: true,
+            solid: true,
+            hitbox: (
+                width: 100,
+                height: 100,
+                offset_x: 0,
+                offset_y: 0,
+            ),
+            kind: Wall(
+                durability: None,
+            ),
+        ),
+        (
+            name: "Water",
+            ob_tick: 0,
+            collision: false,
+            solid: false,
+            hitbox: (
+                width: 100,
+                height: 100,
+                offset_x: 0,
+                offset_y: 0,
+            ),
+            nav_tags: [
+                "water",
+            ],
+            kind: Environment(
+                walkable: true,
+                speed_percent: 100,
+            ),
+        ),
+    ],
+    placed: [
+        (
+            object: "Wall",
+            x: 0,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 1,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 1,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 2,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 2,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 3,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 3,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 4,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 4,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 5,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 5,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 6,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 6,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 7,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 7,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 8,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 8,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 9,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 9,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 10,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 10,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 11,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 11,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 12,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 12,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 13,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 13,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 14,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 14,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 15,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 15,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 16,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 16,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 17,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 17,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 18,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 18,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 19,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 19,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 20,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 20,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 21,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 21,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 22,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 22,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 0,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 13,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 1,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 1,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 2,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 2,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 3,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 3,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 4,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 4,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 5,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 5,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 6,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 6,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 7,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 7,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 8,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 8,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 9,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 9,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 10,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 10,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 11,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 11,
+        ),
+        (
+            object: "Wall",
+            x: 0,
+            y: 12,
+        ),
+        (
+            object: "Wall",
+            x: 23,
+            y: 12,
+        ),
+        (
+            object: "Wall",
+            x: 8,
+            y: 1,
+        ),
+        (
+            object: "Wall",
+            x: 8,
+            y: 2,
+        ),
+        (
+            object: "Wall",
+            x: 8,
+            y: 3,
+        ),
+        (
+            object: "Wall",
+            x: 8,
+            y: 4,
+        ),
+        (
+            object: "Wall",
+            x: 8,
+            y: 5,
+        ),
+        (
+            object: "Wall",
+            x: 8,
+            y: 6,
+        ),
+        (
+            object: "Wall",
+            x: 8,
+            y: 7,
+        ),
+        (
+            object: "Wall",
+            x: 8,
+            y: 8,
+        ),
+        (
+            object: "Wall",
+            x: 8,
+            y: 9,
+        ),
+        (
+            object: "Wall",
+            x: 16,
+            y: 1,
+        ),
+        (
+            object: "Wall",
+            x: 16,
+            y: 2,
+        ),
+        (
+            object: "Wall",
+            x: 16,
+            y: 3,
+        ),
+        (
+            object: "Wall",
+            x: 16,
+            y: 4,
+        ),
+        (
+            object: "Wall",
+            x: 16,
+            y: 5,
+        ),
+        (
+            object: "Wall",
+            x: 16,
+            y: 6,
+        ),
+        (
+            object: "Wall",
+            x: 16,
+            y: 7,
+        ),
+        (
+            object: "Water",
+            x: 12,
+            y: 1,
+        ),
+        (
+            object: "Water",
+            x: 12,
+            y: 2,
+        ),
+        (
+            object: "Water",
+            x: 12,
+            y: 3,
+        ),
+        (
+            object: "Water",
+            x: 12,
+            y: 4,
+        ),
+        (
+            object: "Water",
+            x: 12,
+            y: 5,
+        ),
+        (
+            object: "Water",
+            x: 12,
+            y: 8,
+        ),
+        (
+            object: "Water",
+            x: 12,
+            y: 9,
+        ),
+        (
+            object: "Water",
+            x: 12,
+            y: 10,
+        ),
+        (
+            object: "Water",
+            x: 12,
+            y: 11,
+        ),
+        (
+            object: "Water",
+            x: 12,
+            y: 12,
+        ),
+        (
+            object: "Player",
+            x: 3,
+            y: 6,
+        ),
+        (
+            object: "Nextbot",
+            x: 20,
+            y: 3,
+        ),
+        (
+            object: "Wader",
+            x: 20,
+            y: 11,
+        ),
+    ],
+)

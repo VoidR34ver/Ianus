@@ -11,6 +11,7 @@
 
 pub mod aabb;
 pub mod broadphase;
+pub mod nav;
 pub mod replay;
 pub mod rng;
 pub mod schedule;
@@ -18,10 +19,16 @@ pub mod solid;
 
 pub use aabb::Aabb;
 pub use broadphase::BroadPhase;
+pub use nav::{
+    GROUND_COST, NavCosts, NavFilter, NavGrid, PathFinder, PathOutcome, SearchRange, TileWindow,
+    goal_distance_radius, raw_path, segment_clear, smooth_path,
+};
 pub use replay::{Replay, ReplayError};
 pub use rng::Rng;
 pub use schedule::{MAX_OB_TICK, Scheduler};
-pub use solid::{BODY_HALF_SIZE, Footprint, SolidGrid, Solids, step_body_solid};
+pub use solid::{
+    BODY_HALF_SIZE, Footprint, SolidGrid, Solids, step_body_solid, step_body_solid_max, tile_of,
+};
 
 /// Simulation ticks per second.
 pub const TICK_HZ: u32 = 60;
@@ -152,14 +159,16 @@ const fn axis_rate(vel: i32, dir: i32) -> i32 {
 }
 
 /// Work out this tick's velocity from the input: acceleration, friction and
-/// the diagonal correction. Moves nothing. Shared by [`step_body`] and
-/// [`step_body_solid`] so both feel identical.
-pub(crate) fn accelerate(body: &mut Body, input: MoveInput) {
+/// the diagonal correction. Moves nothing. `max_speed` is the top speed on one
+/// axis in subunits per tick; [`MAX_SPEED`] is the default, and slower or
+/// faster things (a creature, a vehicle) use their own. Shared by every step
+/// function so they all feel identical.
+pub fn accelerate_max(body: &mut Body, input: MoveInput, max_speed: i32) {
     let (dx, dy) = input.axis();
     let speed = if dx != 0 && dy != 0 {
-        MAX_SPEED * DIAGONAL_NUM / DIAGONAL_DEN
+        max_speed * DIAGONAL_NUM / DIAGONAL_DEN
     } else {
-        MAX_SPEED
+        max_speed
     };
 
     body.vel.x = approach(body.vel.x, dx * speed, axis_rate(body.vel.x, dx));
@@ -169,7 +178,12 @@ pub(crate) fn accelerate(body: &mut Body, input: MoveInput) {
 /// Advance one body by one tick. Allocation-free and branch-light: this is
 /// the hot path that will run for every agent, every tick.
 pub fn step_body(body: &mut Body, input: MoveInput) {
-    accelerate(body, input);
+    step_body_max(body, input, MAX_SPEED);
+}
+
+/// [`step_body`] with a chosen top speed.
+pub fn step_body_max(body: &mut Body, input: MoveInput, max_speed: i32) {
+    accelerate_max(body, input, max_speed);
 
     // Saturating, so a body at the edge of the world stops instead of
     // wrapping around (which would differ between debug and release).

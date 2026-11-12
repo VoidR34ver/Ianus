@@ -2,6 +2,22 @@
 
 *Written 2026-11-11 for the next agent. Read `CLAUDE.md` (rules), `INFO.md` (overview) and `PROGRESS.md` (state) too. Updated later the same day: repo pushed to GitHub, outside review answered.*
 
+## 2026-11-12: pathfinding (read after the review note below)
+
+**Next session, first:** (1) check that the Mac workflow run succeeded and that the zip opens on a Mac (unverified); (2) look at the new pathfinding GUI on screen with the owner's OK and fix what is wrong, it has only been tested headlessly; (3) finish the break-it check of the GUI tests (`navtools.rs` helpers and the `PaintNavTile` handler).
+
+Pathfinding is built and tested on the same branch (details in `PROGRESS.md`). Decisions for the owner, with my recommendation:
+- **Many chasers at one target:** today each agent runs A*. For hundreds, add a flow field (one search from the target, every agent follows the gradient). Recommended before a colony-scale test, not before.
+- **Bigger bodies:** the nav grid assumes a 0.75-tile body. Per-footprint grids (cached) are the fix; only needed once something bigger than a tile exists.
+- **Doors and toggled obstacles:** need a rule for whether agents may plan through something that can open. Not decided.
+- **Speed of pathfinding:** measured in `PROGRESS.md` (about 0.2 us per tile; 1.4 ms for a 256x256 search). The search window (growing by default, strict optional) exists now. Still open: accepting a partial path to the closest reachable tile when the target is cut off (Minecraft does this; today the agent reports NoPath and waits); whether *growing* should stop after some number of doublings, since on a truly unreachable goal it costs about twice a whole-map search; a faster open list (bucket queue, changes which of equal-cost routes is picked but stays deterministic); a flow field for crowds. Which of these you want is yours to say.
+- **Hazard costs and movement speed:** costs now change the route. Should mud also slow movement (environment `speed_percent`)? Then cost and speed should come from one setting.
+- **Editor:** painting tags onto tiles and drawing routes needs the window; nothing is built there, so tags are authored in room files or code today.
+
+## 2026-11-12: logic-skip review
+
+Branch `claude/logic-skips-investigation-7vqgu5` holds a review that found nine logic skips, fixes for them and tests (list in `PROGRESS.md` Snapshot). It is **not merged**; the owner decides. Step 1 below is now partly done (see `PROGRESS.md` open items). The Rust toolchain on a fresh machine must be 1.99.1 (`cargo` 1.97 fails on Bevy 0.20 dependencies). Open questions for the owner: minimum hitbox size (validator only warns today); whether a tap during pause should be remembered for stepping; replay length cap behaviour.
+
 ## What changed since the first version of this file
 
 - **Repo is on GitHub** (https://github.com/VoidR34ver/Ianus, `main`, one initial commit). The owner will also work from a Mac. Commit/push only on request.

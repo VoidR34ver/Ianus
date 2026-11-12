@@ -1,0 +1,90 @@
+# Builds the Ianus window example for macOS (Apple silicon and Intel) and
+# publishes the result as a GitHub Release you can download.
+#
+# Runs on every push to a claude/** branch, on version tags, and by hand
+# (Actions tab, "Mac build", "Run workflow"). The first build takes about 15
+# minutes (Bevy); later ones use the cache.
+
+name: Mac build
+
+on:
+  push:
+    branches: ["claude/**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: apple-silicon
+            target: aarch64-apple-darwin
+          - name: intel
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build the editor window example
+        run: cargo build --release --target ${{ matrix.target }} -p ianus_engine --example room
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          out="Ianus-mac-${{ matrix.name }}"
+          mkdir -p "$out"
+          cp "target/${{ matrix.target }}/release/examples/room" "$out/ianus"
+          cp -R rooms "$out/rooms"
+          cp tools/mac-run.command "$out/Ianus.command"
+          cp tools/MAC-README.txt "$out/README.txt"
+          chmod +x "$out/ianus" "$out/Ianus.command"
+          # ditto keeps the executable bits that a plain zip can lose.
+          ditto -c -k --keepParent "$out" "$out.zip"
+          ls -la "$out.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ianus-mac-${{ matrix.name }}
+          path: Ianus-mac-${{ matrix.name }}.zip
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="mac-test-${GITHUB_REF_NAME//\//-}"
+          notes="Mac build of ${GITHUB_REF_NAME} at ${GITHUB_SHA::7}. Unsigned: see README.txt inside the zip."
+          gh release delete "$tag" --repo "$REPO" --yes --cleanup-tag || true
+          gh release create "$tag" dist/*.zip --repo "$REPO" \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "Mac test build (${GITHUB_REF_NAME})" --notes "$notes"

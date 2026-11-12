@@ -24,7 +24,9 @@ use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContexts, egui};
 use egui::{Align, Color32, Layout, Stroke, StrokeKind};
 use ianus::prelude::*;
+use ianus_sim::tile_of;
 
+use crate::navtools::{self, Brush, NavTools, RouteView};
 use crate::{
     Action, Actions, EngineCamera, EngineConfig, EngineStatus, GuiVisible, SPEEDS, Selection,
 };
@@ -58,6 +60,7 @@ pub(crate) struct GuiData<'w> {
     _diagnostics: Res<'w, DiagnosticsStore>,
     play_mode: Res<'w, PlayMode>,
     room: Option<Res<'w, CurrentRoom>>,
+    nav: Option<Res<'w, NavMap>>,
 }
 
 type BodyQuery<'w, 's> = Query<
@@ -84,7 +87,10 @@ pub(crate) fn gui_system(
     mut selection: ResMut<Selection>,
     mut actions: ResMut<Actions>,
     mut bodies: BodyQuery,
-    placed: Query<&PlacedObject>,
+    mut placed: Query<&mut PlacedObject>,
+    mut nav_tools: ResMut<NavTools>,
+    mut agents: Query<(Entity, &mut NavAgent, &NavPath)>,
+    object_tags: Query<&NavTags>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
     let scale_factor = window.scale_factor();
@@ -113,7 +119,12 @@ pub(crate) fn gui_system(
     let bottom = egui::Panel::bottom("simulation")
         .resizable(true)
         .default_size(150.0)
-        .show(&mut root, |ui| simulation_panel(ui, &data))
+        .show(&mut root, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("simulation_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| simulation_panel(ui, &data))
+        })
         .response
         .rect
         .height();
@@ -122,7 +133,14 @@ pub(crate) fn gui_system(
         .resizable(true)
         .default_size(210.0)
         .show(&mut root, |ui| {
-            scene_panel(ui, &data, &mut selection, &bodies, &placed, &mut actions)
+            scene_panel(
+                ui,
+                &data,
+                &mut selection,
+                &bodies,
+                &placed.as_readonly(),
+                &mut actions,
+            )
         })
         .response
         .rect
@@ -132,7 +150,21 @@ pub(crate) fn gui_system(
         .resizable(true)
         .default_size(260.0)
         .show(&mut root, |ui| {
-            inspector_panel(ui, &data, &mut selection, &mut bodies, &placed)
+            egui::ScrollArea::vertical()
+                .id_salt("inspector_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    inspector_panel(
+                        ui,
+                        &data,
+                        &mut selection,
+                        &mut bodies,
+                        &mut placed,
+                        &mut agents,
+                        &object_tags,
+                        &mut nav_tools,
+                    )
+                })
         })
         .response
         .rect
@@ -181,6 +213,9 @@ pub(crate) fn gui_system(
         &data,
         &mut selection,
         &bodies,
+        &agents.as_readonly(),
+        &mut nav_tools,
+        &mut actions,
     );
 
     Ok(())
@@ -387,12 +422,17 @@ fn group_by_category(
     groups
 }
 
+// The inspector shows everything about the selection, so it takes every query.
+#[allow(clippy::too_many_arguments)]
 fn inspector_panel(
     ui: &mut egui::Ui,
     data: &GuiData,
     selection: &mut Selection,
     bodies: &mut BodyQuery,
-    placed: &Query<&PlacedObject>,
+    placed: &mut Query<&mut PlacedObject>,
+    agents: &mut Query<(Entity, &mut NavAgent, &NavPath)>,
+    object_tags: &Query<&NavTags>,
+    nav_tools: &mut NavTools,
 ) {
     ui.heading("Inspector");
     ui.separator();
@@ -427,6 +467,37 @@ fn inspector_panel(
             if *data.play_mode == PlayMode::Playing {
                 ui.weak("Changes made while playing are undone by Stop.");
             }
+
+            // Pathfinding: the nav tags this object puts on its tile, and, if
+            // it is an agent, its settings and route.
+            let tag_names = data
+                .room
+                .as_ref()
+                .map(|r| r.0.nav_tags.clone())
+                .unwrap_or_default();
+            if let Ok(tags) = object_tags.get(entity) {
+                let shown: Vec<&str> = tag_names
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i < 32 && tags.0 >> i & 1 == 1)
+                    .map(|(_, n)| n.as_str())
+                    .collect();
+                ui.label(format!("Nav tags on its tile: {}", shown.join(", ")));
+            }
+            if let Ok((_, mut agent, path)) = agents.get_mut(entity) {
+                ui.add_space(6.0);
+                egui::CollapsingHeader::new("Pathfinding")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let tile = (tile_of(body.0.pos.x), tile_of(body.0.pos.y));
+                        if let Some(new) =
+                            navtools::agent_editor(ui, &agent, path, tile, &tag_names, !locked)
+                        {
+                            *agent = new;
+                        }
+                        ui.weak("Changes here are not saved to the room file.");
+                    });
+            }
             ui.add_space(6.0);
 
             if locked {
@@ -453,6 +524,14 @@ fn inspector_panel(
                     body.0.pos.y = (y * sub).round() as i32;
                     body.0.vel = Vec2i::ZERO;
                     prev.0 = body.0.pos;
+                    // In edit mode this is moving the object's starting point,
+                    // so Restart and recording must not put it back. While
+                    // playing it is a temporary nudge that Stop undoes.
+                    if *data.play_mode == PlayMode::Editing
+                        && let Ok(mut object) = placed.get_mut(entity)
+                    {
+                        object.home = body.0.pos;
+                    }
                 }
                 if ui
                     .button("Stop")
@@ -513,6 +592,27 @@ fn inspector_panel(
         ui.label(format!("{} tiles tall", data.config.view_height_tiles));
         ui.label(format!("{} world units per tile", data.scale.0));
     });
+    ui.add_space(6.0);
+    egui::CollapsingHeader::new("Pathfinding tools")
+        .default_open(true)
+        .show(ui, |ui| {
+            let tags = data
+                .room
+                .as_ref()
+                .map(|r| r.0.nav_tags.clone())
+                .unwrap_or_default();
+            let map = data
+                .nav
+                .as_ref()
+                .map(|n| (n.version, n.grid.width(), n.grid.height()));
+            navtools::nav_tools_panel(
+                ui,
+                nav_tools,
+                &tags,
+                *data.play_mode == PlayMode::Editing,
+                map,
+            );
+        });
 }
 
 fn simulation_panel(ui: &mut egui::Ui, data: &GuiData) {
@@ -549,6 +649,7 @@ fn simulation_panel(ui: &mut egui::Ui, data: &GuiData) {
         ui.label("Messages");
         egui::ScrollArea::vertical()
             .id_salt("messages")
+            .max_height(90.0)
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 let mut any = false;
@@ -632,8 +733,12 @@ fn frame_graph(ui: &mut egui::Ui, samples: &VecDeque<f32>) {
     );
 }
 
-/// Clicking in the game view selects the nearest body; the selected one gets
-/// an outline.
+/// Clicking in the game view selects the nearest body (or, with a paint brush
+/// chosen, paints tiles); the selected one gets an outline, and pathfinding
+/// overlays are drawn on top.
+// The game view needs the camera, the selection, the bodies, the agents, the
+// tools and the action queue.
+#[allow(clippy::too_many_arguments)]
 fn game_view(
     ctx: &egui::Context,
     view: egui::Rect,
@@ -642,6 +747,9 @@ fn game_view(
     data: &GuiData,
     selection: &mut Selection,
     bodies: &BodyQuery,
+    agents: &Query<(Entity, &NavAgent, &NavPath)>,
+    nav_tools: &mut NavTools,
+    actions: &mut Actions,
 ) {
     let tile = data.scale.0;
     let screen_per_world = view.height() / (data.config.view_height_tiles * tile);
@@ -654,7 +762,48 @@ fn game_view(
             .then(|| i.pointer.interact_pos())
             .flatten()
     });
+    // A paint brush takes over the mouse (while editing): dragging paints one
+    // request per tile, right button clears.
+    let painting = nav_tools.brush != Brush::Off && *data.play_mode == PlayMode::Editing;
+    if painting {
+        let (primary, secondary, at) = ctx.input(|i| {
+            (
+                i.pointer.primary_down(),
+                i.pointer.secondary_down(),
+                i.pointer.interact_pos(),
+            )
+        });
+        match at {
+            Some(p)
+                if (primary || secondary) && view.contains(p) && !ctx.is_pointer_over_egui() =>
+            {
+                if let Ok(world) = camera
+                    .viewport_to_world_2d(camera_tf, Vec2::new(p.x - view.min.x, p.y - view.min.y))
+                {
+                    let tags = data
+                        .room
+                        .as_ref()
+                        .map(|r| r.0.nav_tags.clone())
+                        .unwrap_or_default();
+                    let tile = navtools::tile_at(world.x, world.y, data.scale.0);
+                    if let Some(action) = navtools::paint_action(
+                        nav_tools.brush,
+                        secondary,
+                        tile,
+                        &tags,
+                        &mut nav_tools.last_tile,
+                    ) {
+                        actions.push(action);
+                    }
+                }
+            }
+            _ if !(primary || secondary) => nav_tools.last_tile = None,
+            _ => {}
+        }
+    }
+
     if let Some(p) = click
+        && !painting
         && view.contains(p)
         && !ctx.is_pointer_over_egui()
         && let Ok(world) =
@@ -668,6 +817,43 @@ fn game_view(
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(e, _)| e);
     }
+
+    // Pathfinding overlays: tagged tiles, routes, the search window.
+    let to_world = data.scale.0 / SUBUNITS_PER_TILE as f32;
+    let to_screen = |x: i32, y: i32| -> Option<egui::Pos2> {
+        camera
+            .world_to_viewport(
+                camera_tf,
+                Vec3::new(x as f32 * to_world, y as f32 * to_world, 0.0),
+            )
+            .ok()
+            .map(|v| egui::pos2(view.min.x + v.x, view.min.y + v.y))
+    };
+    let routes: Vec<RouteView> = agents
+        .iter()
+        .filter_map(|(entity, agent, path)| {
+            let (_, _, body, ..) = bodies.get(entity).ok()?;
+            Some(RouteView {
+                pos: body.0.pos,
+                path,
+                range: agent.range,
+                selected: selection.0 == Some(entity),
+            })
+        })
+        .collect();
+    let overlay = ctx
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("nav_overlay"),
+        ))
+        .with_clip_rect(view);
+    navtools::draw_nav_overlays(
+        &overlay,
+        &to_screen,
+        data.nav.as_deref(),
+        nav_tools,
+        &routes,
+    );
 
     let Some(selected) = selection.0 else { return };
     let Ok((_, _, _, _, _, t)) = bodies.get(selected) else {

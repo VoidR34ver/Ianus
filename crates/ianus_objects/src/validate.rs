@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Action, Category, Kind, ObjectDef, Room};
+use crate::{Action, AgentTarget, Category, Kind, MAX_NAV_TAGS, ObjectDef, Room};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
@@ -85,14 +85,6 @@ fn check_definition(def: &ObjectDef, problems: &mut Vec<Problem>) {
         ));
     }
     match &def.kind {
-        Kind::Light { radius_tiles: 0, .. } => problems.push(Problem::warning(format!(
-            "Light '{name}' has radius 0, so it lights nothing. Try a radius of 3 or more."
-        ))),
-        Kind::Light { intensity_percent, .. } if *intensity_percent > 100 => {
-            problems.push(Problem::warning(format!(
-                "Light '{name}' has intensity {intensity_percent}%. The scale is 0 to 100; anything higher is treated as 100."
-            )));
-        }
         Kind::SubstanceSource { rate_per_tick: 0, .. } => problems.push(Problem::warning(format!(
             "Substance source '{name}' adds 0 per tick, so it never produces anything. Try a rate of 1."
         ))),
@@ -109,6 +101,24 @@ fn check_definition(def: &ObjectDef, problems: &mut Vec<Problem>) {
         _ => {}
     }
 
+    if let Kind::Light {
+        radius_tiles,
+        intensity_percent,
+        ..
+    } = &def.kind
+    {
+        if *radius_tiles == 0 {
+            problems.push(Problem::warning(format!(
+                "Light '{name}' has radius 0, so it lights nothing. Try a radius of 3 or more."
+            )));
+        }
+        if *intensity_percent > 100 {
+            problems.push(Problem::warning(format!(
+                "Light '{name}' has intensity {intensity_percent}%. The scale is 0 to 100; anything higher is treated as 100."
+            )));
+        }
+    }
+
     // Hitbox and collision switches.
     if def.solid && !def.collision {
         problems.push(Problem::warning(format!(
@@ -117,8 +127,13 @@ fn check_definition(def: &ObjectDef, problems: &mut Vec<Problem>) {
         )));
     }
     if def.collision && (def.hitbox.width == 0 || def.hitbox.height == 0) {
+        let walls = if matches!(def.kind, Kind::Entity { .. }) {
+            " An entity with no area will also walk through walls and out of the room."
+        } else {
+            ""
+        };
         problems.push(Problem::warning(format!(
-            "'{name}' has a hitbox of {}x{}, so nothing can ever touch it. \
+            "'{name}' has a hitbox of {}x{}, so nothing can ever touch it.{walls} \
              Give it a size (100 is one tile) or turn its collision off.",
             def.hitbox.width, def.hitbox.height
         )));
@@ -189,6 +204,21 @@ impl Room {
             problems.push(Problem::error(format!(
                 "There are {count} objects called '{name}'. Names must be unique so placing '{name}' is unambiguous; rename one."
             )));
+        }
+
+        // The level's scale multiplies every interval; the result is capped.
+        if self.world.ob_tick_scale > 1 {
+            for def in &self.objects {
+                if def.ob_tick <= MAX_OB_TICK
+                    && def.ob_tick.saturating_mul(self.world.ob_tick_scale) > MAX_OB_TICK
+                {
+                    problems.push(Problem::warning(format!(
+                        "'{}' has ob_tick {}, and the world's ob_tick_scale of {} stretches that past \
+                         {MAX_OB_TICK} ticks (an hour). It is treated as {MAX_OB_TICK}.",
+                        def.name, def.ob_tick, self.world.ob_tick_scale
+                    )));
+                }
+            }
         }
 
         // A switch that toggles something that does not exist does nothing.
@@ -300,9 +330,165 @@ impl Room {
             ))),
         }
 
+        self.check_nav(&mut problems);
+
         // Worst first, otherwise in the order found.
         problems.sort_by_key(|p| p.severity != Severity::Error);
         problems
+    }
+
+    /// Nav tags, tile painting and agents.
+    fn check_nav(&self, problems: &mut Vec<Problem>) {
+        let declared = || self.nav_tags.iter().map(String::as_str);
+        let unknown_tag = |who: String, tag: &str, problems: &mut Vec<Problem>| {
+            let hint = match did_you_mean(tag, declared()) {
+                Some(k) => format!(" Did you mean '{k}'?"),
+                None if self.nav_tags.is_empty() => {
+                    " This room declares no nav tags yet.".to_string()
+                }
+                None => format!(
+                    " Declared tags: {}.",
+                    declared().collect::<Vec<_>>().join(", ")
+                ),
+            };
+            problems.push(Problem::error(format!(
+                "{who} uses the nav tag '{tag}', but the room does not declare it.{hint}"
+            )));
+        };
+
+        if self.nav_tags.len() > MAX_NAV_TAGS {
+            problems.push(Problem::error(format!(
+                "The room declares {} nav tags, but at most {MAX_NAV_TAGS} are supported.",
+                self.nav_tags.len()
+            )));
+        }
+        let mut names: Vec<&str> = declared().collect();
+        names.sort_unstable();
+        for pair in names.windows(2) {
+            if pair[0] == pair[1] {
+                problems.push(Problem::error(format!(
+                    "The nav tag '{}' is declared more than once. Each tag name must be unique.",
+                    pair[0]
+                )));
+            }
+        }
+        if declared().any(|t| t.trim().is_empty()) {
+            problems.push(Problem::error("A nav tag has an empty name.".into()));
+        }
+
+        for p in &self.nav_paint {
+            if self.tag_bit(&p.tag).is_none() {
+                unknown_tag(format!("The tile ({}, {})", p.x, p.y), &p.tag, problems);
+            }
+            let inside =
+                p.x >= 0 && p.y >= 0 && (p.x as u32) < self.width && (p.y as u32) < self.height;
+            if !inside {
+                problems.push(Problem::error(format!(
+                    "The nav tag '{}' is painted at ({}, {}), outside the {}x{} room.",
+                    p.tag, p.x, p.y, self.width, self.height
+                )));
+            }
+        }
+
+        let controlled_placed = self.placed.iter().any(|p| {
+            matches!(
+                self.find_object(&p.object).map(|d| &d.kind),
+                Some(Kind::Entity {
+                    controlled: true,
+                    ..
+                })
+            )
+        });
+        for def in &self.objects {
+            let name = &def.name;
+            for tag in &def.nav_tags {
+                if self.tag_bit(tag).is_none() {
+                    unknown_tag(format!("Object '{name}'"), tag, problems);
+                }
+            }
+            let Some(agent) = &def.agent else { continue };
+            match &def.kind {
+                Kind::Entity { controlled: true, .. } => problems.push(Problem::error(format!(
+                    "'{name}' is controlled by the keyboard and also has an agent, so the keys and the pathfinding would fight. Remove one."
+                ))),
+                Kind::Entity { .. } => {}
+                _ => problems.push(Problem::error(format!(
+                    "'{name}' has an agent but is not an Entity. Only entities can walk by themselves."
+                ))),
+            }
+            for tag in agent.allow.iter().chain(&agent.avoid) {
+                if self.tag_bit(tag).is_none() {
+                    unknown_tag(format!("The agent '{name}'"), tag, problems);
+                }
+            }
+            for (n, tc) in agent.costs.iter().enumerate() {
+                if self.tag_bit(&tc.tag).is_none() {
+                    unknown_tag(format!("The agent '{name}'"), &tc.tag, problems);
+                }
+                if tc.cost == 0 {
+                    problems.push(Problem::warning(format!(
+                        "Agent '{name}' has a cost of 0 on '{}', which changes nothing. Remove it or give it a cost (a plain step is 10).",
+                        tc.tag
+                    )));
+                }
+                if agent.avoid.contains(&tc.tag) {
+                    problems.push(Problem::warning(format!(
+                        "Agent '{name}' has a cost on '{}' and also avoids it. Avoiding wins, so the cost never applies.",
+                        tc.tag
+                    )));
+                }
+                if agent.costs[..n].iter().any(|o| o.tag == tc.tag) {
+                    problems.push(Problem::warning(format!(
+                        "Agent '{name}' lists a cost for '{}' more than once. The last one is used.",
+                        tc.tag
+                    )));
+                }
+            }
+            if let Some(both) = agent.allow.iter().find(|t| agent.avoid.contains(t)) {
+                problems.push(Problem::warning(format!(
+                    "Agent '{name}' both allows and avoids the tag '{both}'. Avoiding wins, so it will never walk there."
+                )));
+            }
+            if !def.collision {
+                problems.push(Problem::warning(format!(
+                    "Agent '{name}' has collision off, so it walks straight through walls. Its pathfinding still routes around them, which is probably not what you want."
+                )));
+            }
+            if def.solid {
+                problems.push(Problem::warning(format!(
+                    "Agent '{name}' is solid, so every other agent treats it as a wall while it moves. Usually it should not be."
+                )));
+            }
+            if def.hitbox.width > 75 || def.hitbox.height > 75 {
+                problems.push(Problem::warning(format!(
+                    "Agent '{name}' has a hitbox of {}x{}. Routes are planned for a body up to 75x75, so a bigger one can get stuck in one-tile gaps.",
+                    def.hitbox.width, def.hitbox.height
+                )));
+            }
+            if def.ob_tick == 0 {
+                problems.push(Problem::warning(format!(
+                    "Agent '{name}' has ob_tick 0, so it never plans a route and will stand still. Use 1 to replan every tick, or a larger number to replan less often."
+                )));
+            }
+            match &agent.target {
+                AgentTarget::Controlled if !controlled_placed => {
+                    problems.push(Problem::warning(format!(
+                        "Agent '{name}' chases the controlled entity, but none is placed in this room, so it has nothing to chase."
+                    )));
+                }
+                AgentTarget::Named(target) if self.find_object(target).is_none() => {
+                    let hint =
+                        match did_you_mean(target, self.objects.iter().map(|o| o.name.as_str())) {
+                            Some(k) => format!(" Did you mean '{k}'?"),
+                            None => String::new(),
+                        };
+                    problems.push(Problem::warning(format!(
+                        "Agent '{name}' chases '{target}', but no object with that name is defined, so it will stand still.{hint}"
+                    )));
+                }
+                _ => {}
+            }
+        }
     }
 
     /// True if there are no [`Severity::Error`] problems.

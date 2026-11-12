@@ -1,0 +1,1695 @@
+//! Pathfinding on the tile grid.
+//!
+//! Integer maths only, like the rest of this crate, so the same map and the
+//! same question give the same path on every machine.
+//!
+//! * [`NavGrid`] says which tiles a body can physically stand on, which
+//!   *tags* each tile carries (road, water, mud: whatever the game names), and
+//!   what it costs to cross.
+//! * [`NavFilter`] is what one kind of agent is allowed to walk on: a list of
+//!   tags it may use (empty means anything) and a list it must avoid. Walls
+//!   always block, whatever the filter says.
+//! * [`PathFinder`] is A* over the grid: eight directions, no cutting corners,
+//!   fixed tie-breaking, buffers reused between searches.
+//! * [`smooth_path`] turns the tile-by-tile route into a few straight legs,
+//!   using swept hitbox checks against [`Solids`], so a body follows the route
+//!   without zig-zagging along tile centres.
+//!
+//! Costs: a straight step costs the cost of the tile entered (10 for plain
+//! ground), a diagonal step costs 14/10 of that, rounded down. Every tile
+//! costs at least 10, which keeps the heuristic honest.
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
+use crate::{Footprint, SUBUNITS_PER_TILE, Solids, Vec2i, tile_of};
+
+/// Cost of crossing one tile of plain ground in a straight line.
+pub const GROUND_COST: u8 = 10;
+
+/// What an agent may walk on. Tags are bits, so at most 32 kinds of tile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct NavFilter {
+    /// If not 0, a tile must carry at least one of these tags. Plain ground
+    /// carries no tags, so a non-zero `allow` means "only on these".
+    pub allow: u32,
+    /// A tile carrying any of these tags is never entered.
+    pub deny: u32,
+}
+
+impl NavFilter {
+    /// Anything goes (walls still block).
+    pub const ANY: NavFilter = NavFilter { allow: 0, deny: 0 };
+
+    /// May an agent with this filter enter a tile with these tags?
+    #[inline]
+    pub const fn admits(&self, tags: u32) -> bool {
+        tags & self.deny == 0 && (self.allow == 0 || tags & self.allow != 0)
+    }
+}
+
+/// What it costs one agent to step onto a tile carrying each tag, on top of the
+/// tile's own cost. This is the Minecraft idea of a path "malus": water is not
+/// forbidden, it is *expensive*, so the cheapest total route wins, and a long
+/// way round beats a short wade only when the detour costs less than the
+/// hazard. 0 (the default) means the tag costs nothing extra. Forbidding a tag
+/// outright is [`NavFilter::deny`].
+///
+/// A tile carrying several tags costs its worst one, not the sum.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct NavCosts([u8; 32]);
+
+impl NavCosts {
+    /// No extra costs.
+    pub const NONE: NavCosts = NavCosts([0; 32]);
+
+    /// The same costs with tag number `tag_index` (its bit position) costing
+    /// `extra` more. Indexes of 32 or more are ignored.
+    pub const fn with(mut self, tag_index: usize, extra: u8) -> Self {
+        if tag_index < 32 {
+            self.0[tag_index] = extra;
+        }
+        self
+    }
+
+    /// The extra cost of tag number `tag_index`.
+    pub const fn get(&self, tag_index: usize) -> u8 {
+        if tag_index < 32 { self.0[tag_index] } else { 0 }
+    }
+
+    /// The extra cost of a tile carrying these tags: its worst hazard.
+    #[inline]
+    pub fn extra(&self, mut tags: u32) -> u16 {
+        let mut worst = 0u8;
+        while tags != 0 {
+            worst = worst.max(self.0[tags.trailing_zeros() as usize]);
+            tags &= tags - 1;
+        }
+        u16::from(worst)
+    }
+}
+
+/// The map pathfinding runs on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavGrid {
+    width: u32,
+    height: u32,
+    open: Vec<bool>,
+    tags: Vec<u32>,
+    cost: Vec<u8>,
+}
+
+impl NavGrid {
+    /// An open grid of plain ground, no tags.
+    pub fn new(width: u32, height: u32) -> Self {
+        let n = width as usize * height as usize;
+        Self {
+            width,
+            height,
+            open: vec![true; n],
+            tags: vec![0; n],
+            cost: vec![GROUND_COST; n],
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    fn index(&self, x: i32, y: i32) -> Option<usize> {
+        if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
+            return None;
+        }
+        Some(y as usize * self.width as usize + x as usize)
+    }
+
+    /// Can a body physically stand here? (Walls and the edge say no.)
+    pub fn set_open(&mut self, x: i32, y: i32, open: bool) {
+        if let Some(i) = self.index(x, y) {
+            self.open[i] = open;
+        }
+    }
+
+    /// Replace a tile's tags.
+    pub fn set_tags(&mut self, x: i32, y: i32, tags: u32) {
+        if let Some(i) = self.index(x, y) {
+            self.tags[i] = tags;
+        }
+    }
+
+    /// Add tags to a tile, keeping the ones it has.
+    pub fn add_tags(&mut self, x: i32, y: i32, tags: u32) {
+        if let Some(i) = self.index(x, y) {
+            self.tags[i] |= tags;
+        }
+    }
+
+    /// Set what crossing a tile costs. Anything under [`GROUND_COST`] is
+    /// raised to it.
+    pub fn set_cost(&mut self, x: i32, y: i32, cost: u8) {
+        if let Some(i) = self.index(x, y) {
+            self.cost[i] = cost.max(GROUND_COST);
+        }
+    }
+
+    pub fn tags(&self, x: i32, y: i32) -> u32 {
+        self.index(x, y).map_or(0, |i| self.tags[i])
+    }
+
+    /// Physically standable, ignoring tags.
+    pub fn is_open(&self, x: i32, y: i32) -> bool {
+        self.index(x, y).is_some_and(|i| self.open[i])
+    }
+
+    /// May an agent with this filter stand on and enter this tile?
+    #[inline]
+    pub fn walkable(&self, x: i32, y: i32, filter: &NavFilter) -> bool {
+        match self.index(x, y) {
+            Some(i) => self.open[i] && filter.admits(self.tags[i]),
+            None => false,
+        }
+    }
+
+    /// Flatten the grid for one kind of agent into a plain array of step costs,
+    /// one per tile, row by row: 0 where the agent may not stand, otherwise the
+    /// tile's own cost plus the extra cost of its worst hazard. A search then
+    /// needs nothing but array lookups, and the array can be kept as long as
+    /// the grid does not change.
+    pub fn cost_field(&self, filter: &NavFilter, costs: &NavCosts, out: &mut Vec<u16>) {
+        out.clear();
+        out.reserve(self.open.len());
+        for i in 0..self.open.len() {
+            let tags = self.tags[i];
+            out.push(if self.open[i] && filter.admits(tags) {
+                u16::from(self.cost[i]) + costs.extra(tags)
+            } else {
+                0
+            });
+        }
+    }
+
+    /// The closest walkable tile to `(x, y)` within `max_radius` tiles, or the
+    /// tile itself if it is walkable. "Closest" means the smallest square ring
+    /// around the tile that holds a walkable one; inside that ring, the shortest
+    /// straight-line distance, and ties go to the lowest row, then the lowest
+    /// column. For targets standing on a tile the agent may not enter, such as
+    /// a player in water.
+    pub fn nearest_walkable(
+        &self,
+        (x, y): (i32, i32),
+        filter: &NavFilter,
+        max_radius: i32,
+    ) -> Option<(i32, i32)> {
+        if self.walkable(x, y, filter) {
+            return Some((x, y));
+        }
+        for r in 1..=max_radius.max(0) {
+            let mut best: Option<(i64, (i32, i32))> = None;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs().max(dy.abs()) != r || !self.walkable(x + dx, y + dy, filter) {
+                        continue;
+                    }
+                    let d = i64::from(dx) * i64::from(dx) + i64::from(dy) * i64::from(dy);
+                    if best.is_none_or(|(bd, _)| d < bd) {
+                        best = Some((d, (x + dx, y + dy)));
+                    }
+                }
+            }
+            if let Some((_, tile)) = best {
+                return Some(tile);
+            }
+        }
+        None
+    }
+}
+
+/// How a search ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathOutcome {
+    /// A cheapest route was written to `out`, start and goal included.
+    Found { cost: u32 },
+    /// The start and goal are fine but no route exists for this filter.
+    NoPath,
+    /// Gave up after the allowed number of tile expansions. A route may exist.
+    Capped,
+    /// The start tile is not walkable for this filter.
+    BadStart,
+    /// The goal tile is not walkable for this filter.
+    BadGoal,
+    /// No route exists *inside the search window*. One may exist outside it.
+    /// Only returned for a search that was not allowed to look further.
+    NoPathInWindow,
+}
+
+/// A rectangle of tiles, edges included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileWindow {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+impl TileWindow {
+    /// The square of tiles within `radius` of `centre` (Chebyshev distance), so
+    /// `radius` tiles out from the centre tile on every side.
+    pub const fn around(centre: (i32, i32), radius: i32) -> Self {
+        Self {
+            x0: centre.0.saturating_sub(radius),
+            y0: centre.1.saturating_sub(radius),
+            x1: centre.0.saturating_add(radius),
+            y1: centre.1.saturating_add(radius),
+        }
+    }
+
+    /// The whole of a `width` x `height` map.
+    pub const fn whole(width: u32, height: u32) -> Self {
+        Self {
+            x0: 0,
+            y0: 0,
+            x1: width as i32 - 1,
+            y1: height as i32 - 1,
+        }
+    }
+
+    #[inline]
+    pub const fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
+    }
+
+    /// Does this window include every tile of a `width` x `height` map?
+    pub const fn covers(&self, width: u32, height: u32) -> bool {
+        self.x0 <= 0 && self.y0 <= 0 && self.x1 >= width as i32 - 1 && self.y1 >= height as i32 - 1
+    }
+}
+
+/// How far a search may look from where the agent stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SearchRange {
+    /// The whole map. Never misses a route, but a goal that cannot be reached
+    /// makes the search visit every tile it can get to.
+    Whole,
+    /// Only a square window centred on the agent, as wide as the distance to
+    /// the goal (see [`goal_distance_radius`]): the goal is always just inside
+    /// it. Cheap, and gives up fast on a goal the window cannot reach, such as
+    /// one just across a long wall whose way round is outside the window.
+    Strict,
+    /// Start with that window, and if there is no route inside it try one twice
+    /// as wide, and so on until the window covers the map. Finds a route
+    /// whenever one exists, and does the small searches first. The route
+    /// found in a small window is the best one inside it, which can be a little
+    /// longer than the best one on the whole map.
+    #[default]
+    Growing,
+}
+
+/// The half-width of the search window for a goal: the length of the vector
+/// from `start` to `goal`, rounded up to a whole tile, and at least 1. Since a
+/// vector is never shorter than its larger component, the goal is always
+/// inside a window of this radius. Integer maths only.
+pub fn goal_distance_radius(start: (i32, i32), goal: (i32, i32)) -> i32 {
+    let dx = i64::from(goal.0) - i64::from(start.0);
+    let dy = i64::from(goal.1) - i64::from(start.1);
+    let squared = (dx * dx + dy * dy) as u64;
+    // Smallest r with r * r >= squared, by binary search on integers (no
+    // floating point anywhere in this crate).
+    let (mut lo, mut hi) = (0u64, squared.min(1 << 32));
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if mid * mid >= squared {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    let r = lo;
+    (r.max(1)).min(i32::MAX as u64) as i32
+}
+
+/// Neighbour offsets in a fixed order: the four straight ones, then the
+/// diagonals. The order only matters when two routes cost the same, and then it
+/// must be the same everywhere.
+const NEIGHBOURS: [(i32, i32); 8] = [
+    (0, 1),
+    (1, 0),
+    (0, -1),
+    (-1, 0),
+    (1, 1),
+    (1, -1),
+    (-1, -1),
+    (-1, 1),
+];
+
+/// A* with buffers kept between searches. Make one and reuse it.
+#[derive(Debug, Default)]
+pub struct PathFinder {
+    g: Vec<u32>,
+    parent: Vec<u32>,
+    seen: Vec<u32>,
+    done: Vec<u32>,
+    generation: u32,
+    heap: BinaryHeap<Reverse<(u32, u32, u32)>>,
+    expansions: u32,
+    field: Vec<u16>,
+}
+
+impl PathFinder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many tiles the most recent search expanded. A tile is expanded at
+    /// most once per search, so this never exceeds the walkable tile count.
+    pub fn last_expansions(&self) -> u32 {
+        self.expansions
+    }
+
+    fn prepare(&mut self, cells: usize) {
+        if self.g.len() != cells {
+            self.g = vec![0; cells];
+            self.parent = vec![0; cells];
+            self.seen = vec![0; cells];
+            self.done = vec![0; cells];
+            self.generation = 0;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.seen.fill(0);
+            self.done.fill(0);
+            self.generation = 1;
+        }
+        self.heap.clear();
+    }
+
+    /// Find the cheapest route from `start` to `goal` (tile coordinates) for
+    /// an agent with `filter`, expanding at most `max_expansions` tiles.
+    /// On [`PathOutcome::Found`] `out` holds the tiles from start to goal;
+    /// otherwise it is left empty. Builds the agent's cost field for this one
+    /// search; anything that searches often should keep a field with
+    /// [`NavGrid::cost_field`] and call [`PathFinder::find_in_field`].
+    pub fn find(
+        &mut self,
+        grid: &NavGrid,
+        filter: &NavFilter,
+        start: (i32, i32),
+        goal: (i32, i32),
+        max_expansions: u32,
+        out: &mut Vec<(i32, i32)>,
+    ) -> PathOutcome {
+        self.find_costed(
+            grid,
+            filter,
+            &NavCosts::NONE,
+            start,
+            goal,
+            max_expansions,
+            out,
+        )
+    }
+
+    /// [`find`](Self::find) for an agent that also has hazard costs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_costed(
+        &mut self,
+        grid: &NavGrid,
+        filter: &NavFilter,
+        costs: &NavCosts,
+        start: (i32, i32),
+        goal: (i32, i32),
+        max_expansions: u32,
+        out: &mut Vec<(i32, i32)>,
+    ) -> PathOutcome {
+        let mut field = std::mem::take(&mut self.field);
+        grid.cost_field(filter, costs, &mut field);
+        let outcome = self.find_in_field(
+            grid.width,
+            grid.height,
+            &field,
+            start,
+            goal,
+            max_expansions,
+            out,
+        );
+        self.field = field;
+        outcome
+    }
+
+    /// The search itself, on a cost field from [`NavGrid::cost_field`] (0 is
+    /// blocked, everything else is what stepping onto that tile costs, at
+    /// least [`GROUND_COST`]). Costs are all it knows about the map, which is
+    /// what makes it fast: no tag tests, no bounds tests beyond one compare.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_in_field(
+        &mut self,
+        width: u32,
+        height: u32,
+        field: &[u16],
+        start: (i32, i32),
+        goal: (i32, i32),
+        max_expansions: u32,
+        out: &mut Vec<(i32, i32)>,
+    ) -> PathOutcome {
+        let whole = TileWindow::whole(width, height);
+        self.find_in_window(
+            width,
+            height,
+            field,
+            whole,
+            start,
+            goal,
+            max_expansions,
+            out,
+        )
+    }
+
+    /// [`find_in_field`](Self::find_in_field), but never looking at a tile
+    /// outside `window`. [`PathOutcome::NoPathInWindow`] means no route exists
+    /// inside it (one may exist outside); if the window covers the whole map the
+    /// answer is [`PathOutcome::NoPath`] as usual.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_in_window(
+        &mut self,
+        width: u32,
+        height: u32,
+        field: &[u16],
+        window: TileWindow,
+        start: (i32, i32),
+        goal: (i32, i32),
+        max_expansions: u32,
+        out: &mut Vec<(i32, i32)>,
+    ) -> PathOutcome {
+        out.clear();
+        self.expansions = 0;
+        let (w, h) = (width as i32, height as i32);
+        debug_assert_eq!(field.len(), width as usize * height as usize);
+        let step_onto = |x: i32, y: i32| -> u32 {
+            if x < 0 || y < 0 || x >= w || y >= h {
+                0
+            } else {
+                u32::from(field[(y * w + x) as usize])
+            }
+        };
+        if step_onto(start.0, start.1) == 0 {
+            return PathOutcome::BadStart;
+        }
+        if step_onto(goal.0, goal.1) == 0 {
+            return PathOutcome::BadGoal;
+        }
+        if start == goal {
+            out.push(start);
+            return PathOutcome::Found { cost: 0 };
+        }
+        if !window.contains(start.0, start.1) || !window.contains(goal.0, goal.1) {
+            return PathOutcome::NoPathInWindow;
+        }
+        let complete = window.covers(width, height);
+
+        self.prepare(field.len());
+        let gen_ = self.generation;
+        let idx = |x: i32, y: i32| (y * w + x) as u32;
+        let heuristic = |x: i32, y: i32| -> u32 {
+            let dx = (x - goal.0).unsigned_abs();
+            let dy = (y - goal.1).unsigned_abs();
+            // Octile distance at the cheapest possible tile cost.
+            10 * dx.max(dy) + 4 * dx.min(dy)
+        };
+
+        let s = idx(start.0, start.1) as usize;
+        let goal_i = idx(goal.0, goal.1);
+        self.g[s] = 0;
+        self.seen[s] = gen_;
+        let h0 = heuristic(start.0, start.1);
+        self.heap.push(Reverse((h0, h0, s as u32)));
+
+        while let Some(Reverse((_, _, i))) = self.heap.pop() {
+            let iu = i as usize;
+            if self.done[iu] == gen_ {
+                continue;
+            }
+            self.done[iu] = gen_;
+            if i == goal_i {
+                let cost = self.g[iu];
+                let mut at = i;
+                out.push(goal);
+                while at as usize != s {
+                    at = self.parent[at as usize];
+                    out.push(((at as i32) % w, (at as i32) / w));
+                }
+                out.reverse();
+                return PathOutcome::Found { cost };
+            }
+            self.expansions += 1;
+            if self.expansions > max_expansions {
+                return PathOutcome::Capped;
+            }
+            let (x, y) = ((i as i32) % w, (i as i32) / w);
+            for (k, &(dx, dy)) in NEIGHBOURS.iter().enumerate() {
+                let (nx, ny) = (x + dx, y + dy);
+                if !window.contains(nx, ny) {
+                    continue;
+                }
+                let tile_cost = step_onto(nx, ny);
+                if tile_cost == 0 {
+                    continue;
+                }
+                let diagonal = k >= 4;
+                // No cutting corners: a diagonal step needs both straight
+                // neighbours it passes between to be walkable too.
+                if diagonal && (step_onto(x + dx, y) == 0 || step_onto(x, y + dy) == 0) {
+                    continue;
+                }
+                let n = idx(nx, ny);
+                let nu = n as usize;
+                if self.done[nu] == gen_ {
+                    continue;
+                }
+                let step = if diagonal {
+                    tile_cost * 14 / 10
+                } else {
+                    tile_cost
+                };
+                let ng = self.g[iu] + step;
+                if self.seen[nu] != gen_ || ng < self.g[nu] {
+                    self.seen[nu] = gen_;
+                    self.g[nu] = ng;
+                    self.parent[nu] = i;
+                    let h = heuristic(nx, ny);
+                    // Ties: lower estimate-to-go first (go deeper), then the
+                    // lower tile index, so the order is total and fixed.
+                    self.heap.push(Reverse((ng + h, h, n)));
+                }
+            }
+        }
+        if complete {
+            PathOutcome::NoPath
+        } else {
+            PathOutcome::NoPathInWindow
+        }
+    }
+
+    /// Search with a [`SearchRange`] on a cost field: the window is sized from
+    /// the distance to the goal (see [`goal_distance_radius`]).
+    ///
+    /// * `Whole` searches the whole map.
+    /// * `Strict` searches only that window and reports
+    ///   [`PathOutcome::NoPathInWindow`] if the route is not inside it.
+    /// * `Growing` doubles the window until a route is found or the window
+    ///   covers the map (then the answer is final).
+    ///
+    /// `max_expansions` applies to each attempt. A capped attempt ends the whole
+    /// search with [`PathOutcome::Capped`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_ranged(
+        &mut self,
+        width: u32,
+        height: u32,
+        field: &[u16],
+        range: SearchRange,
+        start: (i32, i32),
+        goal: (i32, i32),
+        max_expansions: u32,
+        out: &mut Vec<(i32, i32)>,
+    ) -> PathOutcome {
+        if range == SearchRange::Whole {
+            return self.find_in_field(width, height, field, start, goal, max_expansions, out);
+        }
+        let mut radius = goal_distance_radius(start, goal);
+        loop {
+            let window = TileWindow::around(start, radius);
+            let outcome = self.find_in_window(
+                width,
+                height,
+                field,
+                window,
+                start,
+                goal,
+                max_expansions,
+                out,
+            );
+            if outcome != PathOutcome::NoPathInWindow || range == SearchRange::Strict {
+                return outcome;
+            }
+            radius = radius.saturating_mul(2);
+        }
+    }
+}
+
+/// Can a body with this footprint slide in a straight line from `a` to `b`
+/// without touching a solid, or overlapping a tile that `tile_ok` refuses?
+///
+/// The hitbox is checked at points no further apart than half its size, so it
+/// cannot hop over anything. A footprint with no area is never blocked.
+pub fn segment_clear(
+    solids: &Solids,
+    fp: &Footprint,
+    a: Vec2i,
+    b: Vec2i,
+    tile_ok: &dyn Fn(i32, i32) -> bool,
+) -> bool {
+    let step = i64::from(fp.half_x.min(fp.half_y));
+    if step <= 0 {
+        return true;
+    }
+    let dx = i64::from(b.x) - i64::from(a.x);
+    let dy = i64::from(b.y) - i64::from(a.y);
+    let dist = dx.abs().max(dy.abs());
+    let n = ((dist + step - 1) / step).max(1);
+    for i in 0..=n {
+        let x = (i64::from(a.x) + dx * i / n) as i32;
+        let y = (i64::from(a.y) + dy * i / n) as i32;
+        let bb = fp.aabb_at(x, y);
+        if solids.overlaps(&bb) {
+            return false;
+        }
+        let (x0, x1) = (tile_of(bb.min_x), tile_of(bb.max_x - 1));
+        let (y0, y1) = (tile_of(bb.min_y), tile_of(bb.max_y - 1));
+        for ty in y0..=y1 {
+            for tx in x0..=x1 {
+                if !tile_ok(tx, ty) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Turn a tile route into waypoints (tile centres, in subunits), skipping
+/// every tile that a straight, clear slide can bypass. The first tile (where
+/// the agent already is) is not included. Looks at most `lookahead` tiles ahead
+/// so one call stays cheap on long routes.
+pub fn smooth_path(
+    solids: &Solids,
+    fp: &Footprint,
+    tile_ok: &dyn Fn(i32, i32) -> bool,
+    tiles: &[(i32, i32)],
+    lookahead: usize,
+    out: &mut Vec<Vec2i>,
+) {
+    out.clear();
+    let centre = |t: (i32, i32)| {
+        Vec2i::new(
+            t.0.saturating_mul(SUBUNITS_PER_TILE),
+            t.1.saturating_mul(SUBUNITS_PER_TILE),
+        )
+    };
+    let mut anchor = 0;
+    while anchor + 1 < tiles.len() {
+        let far = (anchor + lookahead.max(1)).min(tiles.len() - 1);
+        let mut best = anchor + 1;
+        for j in (anchor + 2..=far).rev() {
+            if segment_clear(solids, fp, centre(tiles[anchor]), centre(tiles[j]), tile_ok) {
+                best = j;
+                break;
+            }
+        }
+        out.push(centre(tiles[best]));
+        anchor = best;
+    }
+}
+
+/// The plain tile-centre route, with no smoothing. First tile left out.
+pub fn raw_path(tiles: &[(i32, i32)], out: &mut Vec<Vec2i>) {
+    out.clear();
+    for &(x, y) in tiles.iter().skip(1) {
+        out.push(Vec2i::new(
+            x.saturating_mul(SUBUNITS_PER_TILE),
+            y.saturating_mul(SUBUNITS_PER_TILE),
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Aabb;
+
+    const T: i32 = SUBUNITS_PER_TILE;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+        fn below(&mut self, n: u32) -> u32 {
+            self.next() % n
+        }
+    }
+
+    fn random_grid(rng: &mut Lcg, w: u32, h: u32, blocked_pct: u32) -> NavGrid {
+        let mut g = NavGrid::new(w, h);
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                if rng.below(100) < blocked_pct {
+                    g.set_open(x, y, false);
+                }
+                g.set_cost(x, y, (10 + rng.below(4) * 7) as u8);
+                if rng.below(100) < 20 {
+                    g.set_tags(x, y, 1 << rng.below(3));
+                }
+            }
+        }
+        g
+    }
+
+    /// Cost of one step into `to`, from the rules in the module docs, written
+    /// out separately from the search so the two can disagree.
+    fn step_cost(g: &NavGrid, to: (i32, i32), diagonal: bool) -> u32 {
+        let c = u32::from(g.cost[to.1 as usize * g.width as usize + to.0 as usize]);
+        if diagonal { c * 14 / 10 } else { c }
+    }
+
+    /// Is this a legal route, and what does it cost?
+    fn route_cost(g: &NavGrid, f: &NavFilter, path: &[(i32, i32)]) -> u32 {
+        let mut total = 0;
+        for pair in path.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            assert!(
+                dx.abs() <= 1 && dy.abs() <= 1 && (dx, dy) != (0, 0),
+                "not a step"
+            );
+            assert!(
+                g.walkable(b.0, b.1, f),
+                "stepped onto a tile it may not use"
+            );
+            let diagonal = dx != 0 && dy != 0;
+            if diagonal {
+                assert!(
+                    g.walkable(a.0 + dx, a.1, f) && g.walkable(a.0, a.1 + dy, f),
+                    "cut a corner"
+                );
+            }
+            total += step_cost(g, b, diagonal);
+        }
+        total
+    }
+
+    /// Plain Dijkstra by repeated scanning: slow, simple, independent.
+    fn dijkstra(g: &NavGrid, f: &NavFilter, s: (i32, i32), goal: (i32, i32)) -> Option<u32> {
+        let (w, h) = (g.width as i32, g.height as i32);
+        let mut dist = vec![u32::MAX; (w * h) as usize];
+        let mut done = vec![false; (w * h) as usize];
+        dist[(s.1 * w + s.0) as usize] = 0;
+        loop {
+            let mut best: Option<usize> = None;
+            for i in 0..dist.len() {
+                if !done[i] && dist[i] != u32::MAX && best.is_none_or(|b| dist[i] < dist[b]) {
+                    best = Some(i);
+                }
+            }
+            let i = best?;
+            done[i] = true;
+            let (x, y) = (i as i32 % w, i as i32 / w);
+            if (x, y) == goal {
+                return Some(dist[i]);
+            }
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dy) == (0, 0) || !g.walkable(x + dx, y + dy, f) {
+                        continue;
+                    }
+                    let diagonal = dx != 0 && dy != 0;
+                    if diagonal && !(g.walkable(x + dx, y, f) && g.walkable(x, y + dy, f)) {
+                        continue;
+                    }
+                    let n = ((y + dy) * w + x + dx) as usize;
+                    let c = dist[i] + step_cost(g, (x + dx, y + dy), diagonal);
+                    if c < dist[n] {
+                        dist[n] = c;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn matches_dijkstra_on_random_weighted_grids_with_filters() {
+        let mut rng = Lcg(42);
+        let mut pf = PathFinder::new();
+        let mut out = Vec::new();
+        let (mut found, mut none) = (0, 0);
+        for case in 0..400 {
+            let g = random_grid(&mut rng, 13, 11, 28);
+            let filter = match case % 4 {
+                0 => NavFilter::ANY,
+                1 => NavFilter { allow: 0, deny: 1 },
+                2 => NavFilter {
+                    allow: 0b110,
+                    deny: 0,
+                },
+                _ => NavFilter {
+                    allow: 0,
+                    deny: 0b101,
+                },
+            };
+            let s = (rng.below(13) as i32, rng.below(11) as i32);
+            let t = (rng.below(13) as i32, rng.below(11) as i32);
+            let outcome = pf.find(&g, &filter, s, t, u32::MAX, &mut out);
+            match outcome {
+                PathOutcome::BadStart => assert!(!g.walkable(s.0, s.1, &filter)),
+                PathOutcome::BadGoal => assert!(!g.walkable(t.0, t.1, &filter)),
+                PathOutcome::Found { cost } => {
+                    found += 1;
+                    assert_eq!(out.first(), Some(&s));
+                    assert_eq!(out.last(), Some(&t));
+                    assert_eq!(route_cost(&g, &filter, &out), cost, "case {case}");
+                    assert_eq!(
+                        dijkstra(&g, &filter, s, t),
+                        Some(cost),
+                        "case {case}: not cheapest"
+                    );
+                }
+                PathOutcome::NoPath => {
+                    none += 1;
+                    assert_eq!(
+                        dijkstra(&g, &filter, s, t),
+                        None,
+                        "case {case}: a route exists"
+                    );
+                    assert!(out.is_empty());
+                }
+                PathOutcome::Capped => panic!("no cap was set"),
+                PathOutcome::NoPathInWindow => panic!("searched the whole map"),
+            }
+        }
+        assert!(
+            found > 100 && none > 10,
+            "weak test: found {found}, none {none}"
+        );
+    }
+
+    #[test]
+    fn no_tile_is_expanded_twice() {
+        let mut rng = Lcg(99);
+        let mut pf = PathFinder::new();
+        let mut out = Vec::new();
+        for _ in 0..100 {
+            let g = random_grid(&mut rng, 15, 15, 20);
+            let open = (0..15)
+                .flat_map(|y| (0..15).map(move |x| (x, y)))
+                .filter(|&(x, y)| g.walkable(x, y, &NavFilter::ANY))
+                .count() as u32;
+            let s = (rng.below(15) as i32, rng.below(15) as i32);
+            let t = (rng.below(15) as i32, rng.below(15) as i32);
+            pf.find(&g, &NavFilter::ANY, s, t, u32::MAX, &mut out);
+            assert!(
+                pf.last_expansions() <= open,
+                "{} > {open}",
+                pf.last_expansions()
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_question_gives_the_same_route_every_time() {
+        let mut rng = Lcg(7);
+        let g = random_grid(&mut rng, 20, 20, 25);
+        let mut reused = PathFinder::new();
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for _ in 0..50 {
+            let s = (rng.below(20) as i32, rng.below(20) as i32);
+            let t = (rng.below(20) as i32, rng.below(20) as i32);
+            let r1 = reused.find(&g, &NavFilter::ANY, s, t, u32::MAX, &mut a);
+            let r2 = PathFinder::new().find(&g, &NavFilter::ANY, s, t, u32::MAX, &mut b);
+            assert_eq!(r1, r2);
+            assert_eq!(a, b, "a reused finder disagrees with a fresh one");
+        }
+    }
+
+    #[test]
+    fn a_diagonal_may_not_squeeze_between_two_corners() {
+        // . #
+        // # .   (y grows upward in the room, but only the pattern matters)
+        let mut g = NavGrid::new(2, 2);
+        g.set_open(1, 0, false);
+        g.set_open(0, 1, false);
+        let mut out = Vec::new();
+        let r = PathFinder::new().find(&g, &NavFilter::ANY, (0, 0), (1, 1), u32::MAX, &mut out);
+        assert_eq!(r, PathOutcome::NoPath);
+        // With one of the two open, the diagonal is still refused, so it is
+        // a two-step route around.
+        g.set_open(1, 0, true);
+        let r = PathFinder::new().find(&g, &NavFilter::ANY, (0, 0), (1, 1), u32::MAX, &mut out);
+        assert!(matches!(r, PathOutcome::Found { .. }));
+        assert_eq!(out.len(), 3, "{out:?}");
+    }
+
+    #[test]
+    fn trivial_and_bad_endpoints() {
+        let mut g = NavGrid::new(5, 5);
+        g.set_open(2, 2, false);
+        let mut out = vec![(9, 9)];
+        let mut pf = PathFinder::new();
+        assert_eq!(
+            pf.find(&g, &NavFilter::ANY, (1, 1), (1, 1), 10, &mut out),
+            PathOutcome::Found { cost: 0 }
+        );
+        assert_eq!(out, vec![(1, 1)]);
+        assert_eq!(
+            pf.find(&g, &NavFilter::ANY, (2, 2), (0, 0), 10, &mut out),
+            PathOutcome::BadStart
+        );
+        assert!(out.is_empty());
+        assert_eq!(
+            pf.find(&g, &NavFilter::ANY, (0, 0), (2, 2), 10, &mut out),
+            PathOutcome::BadGoal
+        );
+        assert_eq!(
+            pf.find(&g, &NavFilter::ANY, (0, 0), (9, 9), 10, &mut out),
+            PathOutcome::BadGoal
+        );
+    }
+
+    #[test]
+    fn a_cap_gives_up_instead_of_searching_forever() {
+        let g = NavGrid::new(60, 60);
+        let mut out = Vec::new();
+        let mut pf = PathFinder::new();
+        assert_eq!(
+            pf.find(&g, &NavFilter::ANY, (0, 0), (59, 59), 5, &mut out),
+            PathOutcome::Capped
+        );
+        assert!(out.is_empty());
+        // And the finder still works afterwards.
+        assert!(matches!(
+            pf.find(&g, &NavFilter::ANY, (0, 0), (59, 59), u32::MAX, &mut out),
+            PathOutcome::Found { .. }
+        ));
+    }
+
+    #[test]
+    fn tags_decide_where_an_agent_may_walk() {
+        // A 7x1 corridor: ground, ground, road, road, water, road, road.
+        const ROAD: u32 = 1;
+        const WATER: u32 = 2;
+        let mut g = NavGrid::new(7, 1);
+        for x in 2..7 {
+            g.set_tags(x, 0, ROAD);
+        }
+        g.add_tags(4, 0, WATER);
+        let mut out = Vec::new();
+        let mut pf = PathFinder::new();
+        let go = |pf: &mut PathFinder, f: NavFilter, out: &mut Vec<(i32, i32)>| {
+            pf.find(&g, &f, (0, 0), (6, 0), u32::MAX, out)
+        };
+        assert!(matches!(
+            go(&mut pf, NavFilter::ANY, &mut out),
+            PathOutcome::Found { .. }
+        ));
+        assert_eq!(
+            go(
+                &mut pf,
+                NavFilter {
+                    allow: 0,
+                    deny: WATER
+                },
+                &mut out
+            ),
+            PathOutcome::NoPath,
+            "the only way through is water"
+        );
+        // Road-only: the start (plain ground) is not allowed at all.
+        assert_eq!(
+            go(
+                &mut pf,
+                NavFilter {
+                    allow: ROAD,
+                    deny: 0
+                },
+                &mut out
+            ),
+            PathOutcome::BadStart
+        );
+        // Start on the road instead; the water tile (also a road) is allowed.
+        let r = pf.find(
+            &g,
+            &NavFilter {
+                allow: ROAD,
+                deny: 0,
+            },
+            (2, 0),
+            (6, 0),
+            u32::MAX,
+            &mut out,
+        );
+        assert!(matches!(r, PathOutcome::Found { .. }));
+        let r = pf.find(
+            &g,
+            &NavFilter {
+                allow: ROAD,
+                deny: WATER,
+            },
+            (2, 0),
+            (6, 0),
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::NoPath);
+    }
+
+    #[test]
+    fn nearest_walkable_is_closest_and_deterministic() {
+        let mut g = NavGrid::new(7, 7);
+        let f = NavFilter::ANY;
+        assert_eq!(g.nearest_walkable((3, 3), &f, 3), Some((3, 3)));
+        for y in 2..=4 {
+            for x in 2..=4 {
+                g.set_open(x, y, false);
+            }
+        }
+        // All eight neighbours are blocked; ring 2 has many equal-distance
+        // tiles, and ties go to the lowest row, then the lowest column.
+        assert_eq!(g.nearest_walkable((3, 3), &f, 3), Some((3, 1)));
+        assert_eq!(g.nearest_walkable((3, 3), &f, 1), None);
+        // The smallest ring wins: (6,6) is two tiles out on the diagonal, (4,7)
+        // is three straight down.
+        let mut g = NavGrid::new(9, 9);
+        for y in 0..9 {
+            for x in 0..9 {
+                g.set_open(x, y, false);
+            }
+        }
+        g.set_open(6, 6, true);
+        g.set_open(4, 7, true);
+        assert_eq!(g.nearest_walkable((4, 4), &f, 5), Some((6, 6)));
+    }
+
+    #[test]
+    fn straight_slides_respect_solids_and_forbidden_tiles() {
+        let mut s = Solids::new(12, 6);
+        let fp = Footprint::DEFAULT;
+        let a = Vec2i::new(T, 2 * T);
+        let b = Vec2i::new(9 * T, 2 * T);
+        let ok = |_x: i32, _y: i32| true;
+        assert!(segment_clear(&s, &fp, a, b, &ok));
+        // A thin pillar mid-way, off the tile grid.
+        s.set_boxes([Aabb::new(5 * T, T + 100, 5 * T + 200, 3 * T)]);
+        assert!(!segment_clear(&s, &fp, a, b, &ok));
+        // Forbidden tile in the way, no solids.
+        let s = Solids::new(12, 6);
+        let no_water = |x: i32, y: i32| !(x == 5 && y == 2);
+        assert!(!segment_clear(&s, &fp, a, b, &no_water));
+        // A body right beside the forbidden tile clips it with its own width.
+        let near = Vec2i::new(T, 3 * T - 1500);
+        let near_b = Vec2i::new(9 * T, 3 * T - 1500);
+        assert!(
+            !segment_clear(&s, &fp, near, near_b, &no_water),
+            "hitbox overlaps tile row 2"
+        );
+        // A footprint with no area is never blocked.
+        let zero = Footprint {
+            half_x: 0,
+            half_y: 0,
+            offset_x: 0,
+            offset_y: 0,
+        };
+        assert!(segment_clear(&s, &zero, a, b, &no_water));
+    }
+
+    #[test]
+    fn smoothing_keeps_the_corners_and_drops_the_rest() {
+        let fp = Footprint::DEFAULT;
+        // Open room: the whole diagonal-ish route collapses to one leg.
+        let s = Solids::new(20, 20);
+        let g = NavGrid::new(20, 20);
+        let f = NavFilter::ANY;
+        let ok = |x: i32, y: i32| g.walkable(x, y, &f);
+        let mut out = Vec::new();
+        let mut tiles = Vec::new();
+        PathFinder::new().find(&g, &f, (2, 2), (15, 9), u32::MAX, &mut tiles);
+        let mut legs = Vec::new();
+        smooth_path(&s, &fp, &ok, &tiles, 64, &mut legs);
+        assert_eq!(legs, vec![Vec2i::new(15 * T, 9 * T)]);
+
+        // A wall with a gap forces a bend.
+        let mut s = Solids::new(20, 20);
+        let mut g = NavGrid::new(20, 20);
+        for y in 0..20 {
+            if y != 14 {
+                s.set_tile(10, y, true);
+                g.set_open(10, y, false);
+            }
+        }
+        let ok = |x: i32, y: i32| g.walkable(x, y, &f);
+        PathFinder::new().find(&g, &f, (3, 3), (17, 3), u32::MAX, &mut tiles);
+        smooth_path(&s, &fp, &ok, &tiles, 64, &mut legs);
+        assert!(legs.len() >= 2 && legs.len() < tiles.len() - 1, "{legs:?}");
+        assert_eq!(legs.last(), Some(&Vec2i::new(17 * T, 3 * T)));
+        // Every leg is a clear slide.
+        let mut from = Vec2i::new(3 * T, 3 * T);
+        for &p in &legs {
+            assert!(
+                segment_clear(&s, &fp, from, p, &ok),
+                "leg {from:?} -> {p:?}"
+            );
+            from = p;
+        }
+        raw_path(&tiles, &mut out);
+        assert_eq!(out.len(), tiles.len() - 1);
+        let _ = out;
+    }
+
+    // ---- Hazard costs ----
+
+    fn costed_step(g: &NavGrid, c: &NavCosts, to: (i32, i32), diagonal: bool) -> u32 {
+        let i = to.1 as usize * g.width as usize + to.0 as usize;
+        let cost = u32::from(g.cost[i]) + u32::from(c.extra(g.tags[i]));
+        if diagonal { cost * 14 / 10 } else { cost }
+    }
+
+    /// Dijkstra with hazard costs, written without the cost field.
+    fn costed_dijkstra(
+        g: &NavGrid,
+        f: &NavFilter,
+        c: &NavCosts,
+        s: (i32, i32),
+        goal: (i32, i32),
+    ) -> Option<u32> {
+        let (w, h) = (g.width as i32, g.height as i32);
+        let mut dist = vec![u32::MAX; (w * h) as usize];
+        let mut done = vec![false; (w * h) as usize];
+        dist[(s.1 * w + s.0) as usize] = 0;
+        loop {
+            let mut best: Option<usize> = None;
+            for i in 0..dist.len() {
+                if !done[i] && dist[i] != u32::MAX && best.is_none_or(|b| dist[i] < dist[b]) {
+                    best = Some(i);
+                }
+            }
+            let i = best?;
+            done[i] = true;
+            let (x, y) = (i as i32 % w, i as i32 / w);
+            if (x, y) == goal {
+                return Some(dist[i]);
+            }
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dy) == (0, 0) || !g.walkable(x + dx, y + dy, f) {
+                        continue;
+                    }
+                    let diagonal = dx != 0 && dy != 0;
+                    if diagonal && !(g.walkable(x + dx, y, f) && g.walkable(x, y + dy, f)) {
+                        continue;
+                    }
+                    let n = ((y + dy) * w + x + dx) as usize;
+                    let step = costed_step(g, c, (x + dx, y + dy), diagonal);
+                    if dist[i] + step < dist[n] {
+                        dist[n] = dist[i] + step;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cheapest_total_route_wins_not_the_shortest() {
+        // Three corridors between a start on the left and a goal on the right,
+        // each with one hazard tile in it:
+        //   top:    longest way round (4 rows out and back), no hazard
+        //   middle: short, FIRE (expensive)
+        //   bottom: medium (3 rows out and back), WATER (cheap)
+        const FIRE: usize = 0;
+        const WATER: usize = 1;
+        let mut g = NavGrid::new(13, 9);
+        for y in 0..9 {
+            for x in 0..13 {
+                g.set_open(x, y, false);
+            }
+        }
+        let open = |g: &mut NavGrid, x: i32, y: i32| g.set_open(x, y, true);
+        for x in 0..13 {
+            open(&mut g, x, 4); // middle corridor
+        }
+        for y in 0..9 {
+            open(&mut g, 0, y); // left connector
+            open(&mut g, 12, y); // right connector
+        }
+        for x in 0..13 {
+            open(&mut g, x, 0); // top corridor, 4 rows from the start
+            open(&mut g, x, 7); // bottom corridor
+        }
+        g.add_tags(6, 4, 1 << FIRE);
+        g.add_tags(6, 7, 1 << WATER);
+        let mut out = Vec::new();
+        let mut pf = PathFinder::new();
+        let run = |pf: &mut PathFinder, costs: NavCosts, out: &mut Vec<(i32, i32)>| {
+            pf.find_costed(&g, &NavFilter::ANY, &costs, (0, 4), (12, 4), u32::MAX, out);
+            let &(_, y) = out
+                .iter()
+                .find(|&&(x, _)| x == 6)
+                .expect("crosses column 6");
+            y
+        };
+        // No hazard costs: the straight middle corridor.
+        assert_eq!(run(&mut pf, NavCosts::NONE, &mut out), 4);
+        // Fire is dear (200), water is cheap (15): the wade (195) beats both
+        // the fire (320) and the clean detour (200).
+        let costs = NavCosts::NONE.with(FIRE, 200).with(WATER, 15);
+        assert_eq!(run(&mut pf, costs, &mut out), 7, "should wade, not burn");
+        // Make water dearer than the long way round: now the clean top corridor.
+        let costs = NavCosts::NONE.with(FIRE, 200).with(WATER, 250);
+        assert_eq!(
+            run(&mut pf, costs, &mut out),
+            0,
+            "should take the hazard-free route"
+        );
+        // A mild fire cost does not justify a detour.
+        let costs = NavCosts::NONE.with(FIRE, 20).with(WATER, 250);
+        assert_eq!(
+            run(&mut pf, costs, &mut out),
+            4,
+            "a cheap hazard is worth crossing"
+        );
+    }
+
+    #[test]
+    fn a_tile_costs_its_worst_hazard_not_the_sum() {
+        let c = NavCosts::NONE.with(0, 30).with(1, 50).with(2, 10);
+        assert_eq!(c.extra(0), 0);
+        assert_eq!(c.extra(0b001), 30);
+        assert_eq!(c.extra(0b011), 50);
+        assert_eq!(c.extra(0b111), 50);
+        assert_eq!(
+            NavCosts::NONE.with(40, 9),
+            NavCosts::NONE,
+            "out of range is ignored"
+        );
+        assert_eq!(c.get(1), 50);
+        assert_eq!(c.get(99), 0);
+    }
+
+    #[test]
+    fn forbidden_still_beats_costly() {
+        // The only way across is a tag that is both costed and denied.
+        let mut g = NavGrid::new(5, 1);
+        g.add_tags(2, 0, 1);
+        let mut out = Vec::new();
+        let costs = NavCosts::NONE.with(0, 5);
+        let r = PathFinder::new().find_costed(
+            &g,
+            &NavFilter { allow: 0, deny: 1 },
+            &costs,
+            (0, 0),
+            (4, 0),
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::NoPath);
+        let r = PathFinder::new().find_costed(
+            &g,
+            &NavFilter::ANY,
+            &costs,
+            (0, 0),
+            (4, 0),
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::Found { cost: 10 * 4 + 5 });
+    }
+
+    #[test]
+    fn matches_dijkstra_with_random_hazard_costs() {
+        let mut rng = Lcg(2026);
+        let mut pf = PathFinder::new();
+        let mut out = Vec::new();
+        let (mut found, mut detours) = (0, 0);
+        for case in 0..300 {
+            let g = random_grid(&mut rng, 13, 11, 22);
+            let costs = NavCosts::NONE
+                .with(0, rng.below(60) as u8)
+                .with(1, rng.below(120) as u8)
+                .with(2, rng.below(30) as u8);
+            let filter = if case % 3 == 0 {
+                NavFilter { allow: 0, deny: 4 }
+            } else {
+                NavFilter::ANY
+            };
+            let s = (rng.below(13) as i32, rng.below(11) as i32);
+            let t = (rng.below(13) as i32, rng.below(11) as i32);
+            let r = pf.find_costed(&g, &filter, &costs, s, t, u32::MAX, &mut out);
+            match r {
+                PathOutcome::Found { cost } => {
+                    found += 1;
+                    assert_eq!(
+                        costed_dijkstra(&g, &filter, &costs, s, t),
+                        Some(cost),
+                        "case {case}"
+                    );
+                    // The route's own cost, summed step by step, is what was reported.
+                    let sum: u32 = out
+                        .windows(2)
+                        .map(|p| {
+                            costed_step(&g, &costs, p[1], p[0].0 != p[1].0 && p[0].1 != p[1].1)
+                        })
+                        .sum();
+                    assert_eq!(sum, cost, "case {case}");
+                    // Did the hazards change the answer compared with ignoring them?
+                    let mut plain = Vec::new();
+                    pf.find(&g, &filter, s, t, u32::MAX, &mut plain);
+                    detours += usize::from(plain != out);
+                }
+                PathOutcome::NoPath => assert_eq!(costed_dijkstra(&g, &filter, &costs, s, t), None),
+                _ => {}
+            }
+        }
+        assert!(found > 100, "weak test: {found}");
+        assert!(
+            detours > 10,
+            "weak test: hazards changed only {detours} routes"
+        );
+    }
+
+    #[test]
+    fn a_kept_cost_field_gives_the_same_answers_as_building_one_each_time() {
+        let mut rng = Lcg(5);
+        let g = random_grid(&mut rng, 20, 20, 25);
+        let costs = NavCosts::NONE.with(0, 40).with(1, 15);
+        let filter = NavFilter { allow: 0, deny: 4 };
+        let mut field = Vec::new();
+        g.cost_field(&filter, &costs, &mut field);
+        assert_eq!(field.len(), 400);
+        assert!(field.iter().all(|&c| c == 0 || c >= u16::from(GROUND_COST)));
+        let mut pf = PathFinder::new();
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for _ in 0..60 {
+            let s = (rng.below(20) as i32, rng.below(20) as i32);
+            let t = (rng.below(20) as i32, rng.below(20) as i32);
+            let r1 = pf.find_costed(&g, &filter, &costs, s, t, u32::MAX, &mut a);
+            let r2 = pf.find_in_field(20, 20, &field, s, t, u32::MAX, &mut b);
+            assert_eq!(r1, r2);
+            assert_eq!(a, b);
+        }
+    }
+
+    // ---- Search window: as wide as the distance to the goal ----
+
+    #[test]
+    fn the_window_radius_is_the_distance_rounded_up() {
+        assert_eq!(
+            goal_distance_radius((0, 0), (3, 4)),
+            5,
+            "an exact square root is not bumped"
+        );
+        assert_eq!(
+            goal_distance_radius((0, 0), (1, 1)),
+            2,
+            "1.41 rounds up to 2"
+        );
+        assert_eq!(
+            goal_distance_radius((0, 0), (1, 2)),
+            3,
+            "2.24 rounds up to 3"
+        );
+        assert_eq!(goal_distance_radius((0, 0), (0, 7)), 7);
+        assert_eq!(goal_distance_radius((5, 5), (5, 5)), 1, "at least one tile");
+        assert_eq!(
+            goal_distance_radius((9, 2), (-3, -2)),
+            13,
+            "direction does not matter: 12,4 is 12.65"
+        );
+        // For every offset: the smallest radius whose square is at least the
+        // squared distance, and never smaller than the larger component, so the
+        // goal is always inside the window.
+        for dx in -40i32..=40 {
+            for dy in -40i32..=40 {
+                let r = i64::from(goal_distance_radius((0, 0), (dx, dy)));
+                let d2 = i64::from(dx) * i64::from(dx) + i64::from(dy) * i64::from(dy);
+                assert!(r * r >= d2, "{dx},{dy}: {r} is too small");
+                assert!(
+                    d2 <= 1 || (r - 1) * (r - 1) < d2,
+                    "{dx},{dy}: {r} is rounded up too far"
+                );
+                assert!(
+                    r >= i64::from(dx.abs().max(dy.abs())),
+                    "{dx},{dy}: goal outside the window"
+                );
+            }
+        }
+        // Huge distances do not overflow.
+        assert!(goal_distance_radius((i32::MIN / 2, 0), (i32::MAX / 2, 0)) > 0);
+    }
+
+    #[test]
+    fn windows_contain_and_cover() {
+        let w = TileWindow::around((5, 5), 2);
+        assert!(w.contains(3, 3) && w.contains(7, 7) && !w.contains(8, 5) && !w.contains(5, 2));
+        assert!(!w.covers(10, 10));
+        assert!(TileWindow::around((5, 5), 9).covers(10, 10));
+        assert!(TileWindow::whole(10, 10).covers(10, 10));
+        assert!(!TileWindow::whole(10, 10).covers(11, 10));
+    }
+
+    /// A wall with its only gap far from the two sides, so the way round is
+    /// long. 41 wide, 21 tall: wall at x = 20 from y = 0 to y = 19, open at
+    /// y = 20. The two ends are 2 tiles apart, either side of the wall.
+    fn long_wall() -> NavGrid {
+        let mut g = NavGrid::new(41, 21);
+        for y in 0..20 {
+            g.set_open(20, y, false);
+        }
+        g
+    }
+
+    #[test]
+    fn a_strict_window_gives_up_on_a_goal_whose_way_round_is_outside_it() {
+        let g = long_wall();
+        let mut field = Vec::new();
+        g.cost_field(&NavFilter::ANY, &NavCosts::NONE, &mut field);
+        let (s, t) = ((19, 2), (21, 2));
+        let mut pf = PathFinder::new();
+        let mut out = Vec::new();
+        // The goal is 2 tiles away, so the window is radius 2: x 17..21, y 0..4.
+        let r = pf.find_ranged(
+            41,
+            21,
+            &field,
+            SearchRange::Strict,
+            s,
+            t,
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::NoPathInWindow);
+        assert!(out.is_empty());
+        assert!(
+            pf.last_expansions() <= 25,
+            "looked at {} tiles, but the window has only 25",
+            pf.last_expansions()
+        );
+        // Searching the whole map finds the long way round.
+        let whole = pf.find_ranged(41, 21, &field, SearchRange::Whole, s, t, u32::MAX, &mut out);
+        let PathOutcome::Found { cost: whole_cost } = whole else {
+            panic!("{whole:?}")
+        };
+        assert!(
+            out.iter().any(|&(_, y)| y == 20),
+            "the route goes through the gap"
+        );
+        // Growing finds the same route: it keeps widening the window.
+        let grown = pf.find_ranged(
+            41,
+            21,
+            &field,
+            SearchRange::Growing,
+            s,
+            t,
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(grown, PathOutcome::Found { cost: whole_cost });
+    }
+
+    #[test]
+    fn a_window_that_covers_the_map_gives_a_final_answer() {
+        // A goal that really cannot be reached: Growing ends in NoPath (not
+        // "no path in window"), and a covering window says NoPath too.
+        let mut g = NavGrid::new(20, 20);
+        for i in 0..20 {
+            g.set_open(10, i, false);
+        }
+        let mut field = Vec::new();
+        g.cost_field(&NavFilter::ANY, &NavCosts::NONE, &mut field);
+        let mut pf = PathFinder::new();
+        let mut out = Vec::new();
+        let r = pf.find_ranged(
+            20,
+            20,
+            &field,
+            SearchRange::Growing,
+            (5, 5),
+            (15, 5),
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::NoPath);
+        let r = pf.find_in_window(
+            20,
+            20,
+            &field,
+            TileWindow::whole(20, 20),
+            (5, 5),
+            (15, 5),
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::NoPath);
+        // A window that leaves the goal out cannot find it.
+        let r = pf.find_in_window(
+            20,
+            20,
+            &field,
+            TileWindow::around((5, 5), 3),
+            (5, 5),
+            (15, 5),
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(r, PathOutcome::NoPathInWindow);
+    }
+
+    #[test]
+    fn in_open_ground_every_range_finds_the_same_route() {
+        let g = NavGrid::new(60, 60);
+        let mut field = Vec::new();
+        g.cost_field(&NavFilter::ANY, &NavCosts::NONE, &mut field);
+        let mut pf = PathFinder::new();
+        let mut rng = Lcg(77);
+        let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..100 {
+            let s = (rng.below(60) as i32, rng.below(60) as i32);
+            let t = (rng.below(60) as i32, rng.below(60) as i32);
+            let ra = pf.find_ranged(60, 60, &field, SearchRange::Whole, s, t, u32::MAX, &mut a);
+            let rb = pf.find_ranged(60, 60, &field, SearchRange::Strict, s, t, u32::MAX, &mut b);
+            let rc = pf.find_ranged(60, 60, &field, SearchRange::Growing, s, t, u32::MAX, &mut c);
+            assert_eq!(ra, rb);
+            assert_eq!(ra, rc);
+        }
+    }
+
+    #[test]
+    fn a_growing_search_always_finds_a_legal_route_whenever_one_exists() {
+        let mut rng = Lcg(31);
+        let mut pf = PathFinder::new();
+        let (mut out, mut whole_out) = (Vec::new(), Vec::new());
+        let (mut same, mut longer, mut missed_by_strict) = (0, 0, 0);
+        for case in 0..800 {
+            let g = random_grid(&mut rng, 25, 25, 33);
+            let filter = NavFilter::ANY;
+            let mut field = Vec::new();
+            g.cost_field(&filter, &NavCosts::NONE, &mut field);
+            let s = (rng.below(25) as i32, rng.below(25) as i32);
+            let t = (rng.below(25) as i32, rng.below(25) as i32);
+            let whole = pf.find_in_field(25, 25, &field, s, t, u32::MAX, &mut whole_out);
+            let grown = pf.find_ranged(
+                25,
+                25,
+                &field,
+                SearchRange::Growing,
+                s,
+                t,
+                u32::MAX,
+                &mut out,
+            );
+            let strict = pf.find_ranged(
+                25,
+                25,
+                &field,
+                SearchRange::Strict,
+                s,
+                t,
+                u32::MAX,
+                &mut Vec::new(),
+            );
+            match (whole, grown) {
+                (PathOutcome::Found { cost: w }, PathOutcome::Found { cost: g_cost }) => {
+                    // A legal route (steps adjacent, walkable, no corner cutting) ...
+                    assert_eq!(route_cost(&g, &filter, &out), g_cost, "case {case}");
+                    // ... never cheaper than the best on the whole map, and
+                    // usually the same.
+                    assert!(g_cost >= w, "case {case}: cheaper than optimal");
+                    if g_cost == w {
+                        same += 1
+                    } else {
+                        longer += 1
+                    }
+                    if strict == PathOutcome::NoPathInWindow {
+                        missed_by_strict += 1;
+                    }
+                }
+                (a, b) => assert_eq!(
+                    a, b,
+                    "case {case}: growing disagrees with the whole map about reachability"
+                ),
+            }
+        }
+        assert!(same > 100, "weak test: {same} equal");
+        assert!(
+            missed_by_strict > 0,
+            "weak test: strict never missed ({missed_by_strict})"
+        );
+        // Be honest about the trade: a small window can give a slightly longer route.
+        eprintln!(
+            "growing: {same} identical to the best route, {longer} a little longer; strict missed {missed_by_strict}"
+        );
+    }
+
+    #[test]
+    fn a_strict_window_makes_giving_up_cheap() {
+        // A goal sealed in a box far inside a big map: the whole-map search has
+        // to visit everything it can reach, the strict one only its window.
+        let mut g = NavGrid::new(200, 200);
+        for d in -2..=2 {
+            for (x, y) in [
+                (150 + d, 148),
+                (150 + d, 152),
+                (148, 150 + d),
+                (152, 150 + d),
+            ] {
+                g.set_open(x, y, false);
+            }
+        }
+        let mut field = Vec::new();
+        g.cost_field(&NavFilter::ANY, &NavCosts::NONE, &mut field);
+        let mut pf = PathFinder::new();
+        let mut out = Vec::new();
+        let (s, t) = ((140, 150), (150, 150));
+        let strict = pf.find_ranged(
+            200,
+            200,
+            &field,
+            SearchRange::Strict,
+            s,
+            t,
+            u32::MAX,
+            &mut out,
+        );
+        let strict_expansions = pf.last_expansions();
+        assert_eq!(strict, PathOutcome::NoPathInWindow);
+        let whole = pf.find_ranged(
+            200,
+            200,
+            &field,
+            SearchRange::Whole,
+            s,
+            t,
+            u32::MAX,
+            &mut out,
+        );
+        assert_eq!(whole, PathOutcome::NoPath);
+        assert!(
+            strict_expansions * 20 < pf.last_expansions(),
+            "strict looked at {strict_expansions} tiles, whole at {}",
+            pf.last_expansions()
+        );
+    }
+}

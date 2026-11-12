@@ -11,6 +11,7 @@ use ianus_sim::{Body, SUBUNITS_PER_TILE, Vec2i};
 use crate::body::{Controlled, SimBody};
 use crate::collide::{Collider, ColliderIndex, SolidMap, Touching, WorldSettings};
 use crate::input::MoveIntent;
+use crate::nav::{NavFields, NavMap, NavTags, agent_from_def};
 use crate::objects::ObjectSchedule;
 use crate::play::PlayMode;
 use crate::tick::{ReplayMode, SimControl, SimRng, Tick, TickInput};
@@ -112,11 +113,20 @@ pub fn load_room(world: &mut World, room: Room) -> Result<Vec<Problem>, LoadErro
         if let Some(collider) = Collider::for_def(def, level_collision) {
             entity.insert(collider);
         }
+        if !def.nav_tags.is_empty() {
+            entity.insert(NavTags(room.tag_mask(&def.nav_tags)));
+        }
+        if let Some(agent) = agent_from_def(&room, def) {
+            entity.insert(agent);
+        }
         // The level's scale stretches every object's interval; 0 stays 0.
         schedule.add(entity.id(), def.ob_tick.saturating_mul(scale));
     }
 
-    world.insert_resource(SolidMap::from_room(&room));
+    let solid_map = SolidMap::from_room(&room);
+    world.insert_resource(NavMap::from_room(&room, &solid_map.0));
+    world.insert_resource(NavFields::default());
+    world.insert_resource(solid_map);
     world.insert_resource(ColliderIndex::new(room.width, room.height));
     world.insert_resource(Touching::default());
     world.insert_resource(WorldSettings(room.world));

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use bevy_app::App;
-use bevy_ecs::prelude::With;
+use bevy_ecs::prelude::{IntoScheduleConfigs, Query, With};
 use ianus_objects::{Kind, ObjectDef};
 use ianus_sim::SUBUNITS_PER_TILE as TILE;
 
@@ -508,4 +508,191 @@ fn keys_helper_is_reachable_for_other_tests() {
     app.world_mut()
         .init_resource::<bevy_input::ButtonInput<bevy_input::keyboard::KeyCode>>();
     let _ = keys(&mut app);
+}
+
+// ---- Things other than the player moving, and things disappearing ----
+
+/// The cellar plus one wall in the player's row, three tiles to its right.
+fn cellar_with_wall_ahead() -> App {
+    let mut room = cellar();
+    room.place("Wall", 5, 2);
+    let mut app = test_app(1.0);
+    load_room(app.world_mut(), room).expect("valid");
+    play(app.world_mut());
+    // The first frame runs no tick; a few frames make sure the collision
+    // structures have been built at least once.
+    for _ in 0..5 {
+        app.update();
+    }
+    app
+}
+
+fn entity_at(app: &mut App, name: &str, tile: (i32, i32)) -> bevy_ecs::entity::Entity {
+    let home = Vec2i::new(tile.0 * TILE, tile.1 * TILE);
+    let mut q = app
+        .world_mut()
+        .query::<(bevy_ecs::entity::Entity, &PlacedObject)>();
+    q.iter(app.world())
+        .find(|(_, p)| p.name == name && p.home == home)
+        .map(|(e, _)| e)
+        .unwrap_or_else(|| panic!("no {name} at {tile:?}"))
+}
+
+#[test]
+fn a_wall_despawned_during_play_stops_blocking() {
+    let mut app = cellar_with_wall_ahead();
+    let wall = entity_at(&mut app, "Wall", (5, 2));
+    app.world_mut().despawn(wall);
+    hold(&mut app, MoveInput::RIGHT.bits());
+    for _ in 0..120 {
+        app.update();
+    }
+    assert!(
+        body_named(&mut app, "Player").pos.x > 6 * TILE,
+        "the player was stopped by a wall that no longer exists"
+    );
+}
+
+#[test]
+fn a_collider_removed_during_play_stops_blocking() {
+    let mut app = cellar_with_wall_ahead();
+    let wall = entity_at(&mut app, "Wall", (5, 2));
+    app.world_mut().entity_mut(wall).remove::<Collider>();
+    hold(&mut app, MoveInput::RIGHT.bits());
+    for _ in 0..120 {
+        app.update();
+    }
+    assert!(body_named(&mut app, "Player").pos.x > 6 * TILE);
+}
+
+#[test]
+fn despawned_objects_leave_touching_and_due_objects() {
+    let mut room = cellar();
+    room.placed.retain(|p| p.object != "Crate");
+    room.place("Crate", 4, 2);
+    let mut app = test_app(1.0);
+    load_room(app.world_mut(), room).expect("valid");
+    play(app.world_mut());
+    for _ in 0..5 {
+        app.update();
+    }
+    let crate_entity = entity_at(&mut app, "Crate", (4, 2));
+    let due = |app: &App| {
+        app.world()
+            .resource::<DueObjects>()
+            .0
+            .iter()
+            .any(|&(e, _)| e == crate_entity)
+    };
+    assert!(due(&app), "an ob_tick 1 crate is due every tick");
+
+    app.world_mut().despawn(crate_entity);
+    hold(&mut app, MoveInput::RIGHT.bits());
+    for _ in 0..40 {
+        app.update();
+        assert!(!due(&app), "a despawned object was handed out as due");
+        assert!(
+            !app.world().resource::<Touching>().0.contains(&crate_entity),
+            "a despawned object was reported as touched"
+        );
+    }
+    assert!(
+        body_named(&mut app, "Player").pos.x > 4 * TILE,
+        "the player never reached where the crate was, so the test proved nothing"
+    );
+}
+
+/// Game logic: on tick 3, teleport the crate onto the player's start tile.
+fn shove_crate(tick: bevy_ecs::prelude::Res<Tick>, mut q: Query<(&PlacedObject, &mut SimBody)>) {
+    if tick.0 == 3 {
+        for (p, mut b) in &mut q {
+            if p.name == "Crate" {
+                b.0.pos = Vec2i::new(2 * TILE, 2 * TILE);
+            }
+        }
+    }
+}
+
+#[test]
+fn something_other_than_the_player_moving_is_touched_and_drawn_right_away() {
+    let mut app = loaded_app();
+    app.add_systems(
+        bevy_app::FixedUpdate,
+        shove_crate.in_set(crate::IanusSet::Sim),
+    );
+    play(app.world_mut());
+    while ticks(&app) < 4 {
+        app.update();
+    }
+    let crate_entity = entity_at(&mut app, "Crate", (5, 3));
+    assert_eq!(
+        body_named(&mut app, "Crate").pos,
+        Vec2i::new(2 * TILE, 2 * TILE)
+    );
+    assert!(
+        app.world().resource::<Touching>().0.contains(&crate_entity),
+        "Touching must see a move made earlier in the same tick"
+    );
+
+    // One more tick and it has settled: drawn exactly where its body is.
+    app.update();
+    app.update();
+    let x = app
+        .world()
+        .get::<bevy_transform::components::Transform>(crate_entity)
+        .unwrap()
+        .translation
+        .x;
+    assert_eq!(x, 2.0 * 32.0, "drawn somewhere other than where it is");
+}
+
+#[test]
+fn a_key_tapped_while_paused_does_not_fire_on_resume_but_a_held_key_steps() {
+    let mut app = loaded_app();
+    play(app.world_mut());
+    app.update();
+    app.update();
+    app.world_mut().resource_mut::<SimControl>().paused = true;
+    app.update();
+    let before = body_named(&mut app, "Player");
+
+    hold(&mut app, MoveInput::RIGHT.bits()); // tapped while paused
+    app.update();
+    hold(&mut app, 0);
+    for _ in 0..20 {
+        app.update();
+    }
+    app.world_mut().resource_mut::<SimControl>().paused = false;
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        body_named(&mut app, "Player"),
+        before,
+        "a tap from during the pause moved the player after resume"
+    );
+
+    // Holding a key and stepping one tick must still move.
+    app.world_mut().resource_mut::<SimControl>().paused = true;
+    app.update();
+    hold(&mut app, MoveInput::RIGHT.bits());
+    app.world_mut().resource_mut::<SimControl>().step_requests = 1;
+    app.update();
+    assert!(body_named(&mut app, "Player").pos.x > before.pos.x);
+}
+
+#[test]
+fn a_solid_player_is_not_a_wall_in_its_own_way() {
+    let mut room = Room::new("Solo", 12, 8);
+    let mut player = ObjectDef::with_kind(
+        "Player",
+        Kind::Entity {
+            controlled: true,
+            speed_tiles_per_s: 5,
+        },
+    );
+    player.solid = true;
+    room.define(player);
+    room.place("Player", 2, 2);
+    assert_eq!(SolidMap::from_room(&room).0.box_count(), 0);
 }

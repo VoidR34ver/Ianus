@@ -76,6 +76,7 @@ pub(crate) fn plugin(app: &mut App) {
 }
 
 fn gather_move_intent(
+    control: Option<Res<crate::tick::SimControl>>,
     keys: Option<Res<ButtonInput<KeyCode>>>,
     bindings: Res<MoveBindings>,
     mut intent: ResMut<MoveIntent>,
@@ -97,7 +98,11 @@ fn gather_move_intent(
     if intent.held() != held {
         intent.set_held(held);
     }
-    if pressed != MoveInput::NONE {
+    // Taps while the game is paused are dropped, otherwise one would fire the
+    // moment the game resumed. (A step request counts as running: held keys
+    // are always seen, and a tap made for that step is kept.)
+    let frozen = control.is_some_and(|c| c.paused && c.step_requests == 0);
+    if pressed != MoveInput::NONE && !frozen {
         intent.latch(pressed);
     }
 }

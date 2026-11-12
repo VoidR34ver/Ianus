@@ -167,6 +167,107 @@ impl Kind {
     }
 }
 
+/// How far an agent's route search may look from where it stands. The search
+/// window is a square centred on the agent, as wide as the distance to the goal
+/// (rounded up).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SearchMode {
+    /// Search only that window. Cheap, and it gives up quickly on a goal whose
+    /// way round lies outside it (such as one just across a long wall).
+    Strict,
+    /// Search that window; if there is no route in it, a window twice as wide,
+    /// and so on until a route is found or the whole map has been searched.
+    /// Never misses a reachable goal. The default.
+    #[default]
+    Growing,
+    /// Always search the whole map.
+    Whole,
+}
+
+/// Who an agent goes after.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentTarget {
+    /// The entity the keyboard controls (the player).
+    #[default]
+    Controlled,
+    /// The first placed object with this name.
+    Named(String),
+}
+
+fn is_default_search(mode: &SearchMode) -> bool {
+    *mode == SearchMode::default()
+}
+
+fn hundred() -> u32 {
+    100
+}
+
+/// How much extra it costs an agent to step onto a tile carrying a tag. Unlike
+/// `avoid`, the tag is not forbidden: the agent takes the route with the lowest
+/// total cost, so it wades through shallow water to save a long detour but goes
+/// round fire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagCost {
+    pub tag: String,
+    /// Added to the cost of stepping onto such a tile. A plain step costs 10, so
+    /// 40 means "as bad as four extra tiles of walking".
+    pub cost: u8,
+}
+
+/// Makes an entity walk to its target by itself, around walls, using the
+/// level's pathfinding. Movement is the same physics the player has, so an
+/// agent stops at walls the same way and is as fast as its
+/// `speed_tiles_per_s` allows.
+///
+/// Where it may walk is decided by *tags*: names the room declares in
+/// [`Room::nav_tags`] and puts on tiles ([`Room::nav_paint`]) or objects
+/// ([`ObjectDef::nav_tags`]). Walls always block. Plain ground has no tags.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDef {
+    #[serde(default)]
+    pub target: AgentTarget,
+    /// If not empty, the agent only walks on tiles carrying at least one of
+    /// these tags. Because plain ground carries none, a non-empty list means
+    /// "only on these", such as a road-bound cart.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Tiles carrying any of these tags are never entered. Wins over `allow`.
+    #[serde(default)]
+    pub avoid: Vec<String>,
+    /// Tags that are allowed but cost extra to step on. The agent picks the
+    /// cheapest total route, so these decide between a short way through a
+    /// hazard and a long way round.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub costs: Vec<TagCost>,
+    /// How far a route search may look. See [`SearchMode`].
+    #[serde(default, skip_serializing_if = "is_default_search")]
+    pub search: SearchMode,
+    /// Stops this close to the target, in hundredths of a tile.
+    #[serde(default = "hundred")]
+    pub stop_distance: u32,
+}
+
+impl Default for AgentDef {
+    fn default() -> Self {
+        Self {
+            target: AgentTarget::Controlled,
+            allow: Vec::new(),
+            avoid: Vec::new(),
+            costs: Vec::new(),
+            search: SearchMode::default(),
+            stop_distance: 100,
+        }
+    }
+}
+
+/// One tile marked with a nav tag.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NavPaint {
+    pub x: i32,
+    pub y: i32,
+    pub tag: String,
+}
+
 /// An object's hitbox, in hundredths of a tile (`100` is one tile wide).
 /// The offset moves the box away from the object's position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -241,6 +342,14 @@ pub struct ObjectDef {
     pub solid: bool,
     #[serde(default)]
     pub hitbox: Hitbox,
+    /// Nav tags this object puts on the tile it stands on (they must be
+    /// declared in [`Room::nav_tags`]). Agents use them to decide where they
+    /// may walk. Move or delete the object and the tags go with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nav_tags: Vec<String>,
+    /// Makes this entity chase something by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentDef>,
     pub kind: Kind,
 }
 
@@ -276,6 +385,8 @@ impl ObjectDef {
             collision: true,
             solid,
             hitbox,
+            nav_tags: Vec::new(),
+            agent: None,
             kind,
         }
     }
@@ -329,9 +440,19 @@ pub struct Room {
     /// Level-wide settings, read before any object.
     #[serde(default)]
     pub world: WorldRules,
+    /// The names of the nav tags this room uses, at most 32. Position in this
+    /// list is the tag's bit, so only ever add to the end.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nav_tags: Vec<String>,
+    /// Single tiles marked with a nav tag (on top of what objects add).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nav_paint: Vec<NavPaint>,
     pub objects: Vec<ObjectDef>,
     pub placed: Vec<Placed>,
 }
+
+/// Most nav tags a room can declare (they are bits of a `u32`).
+pub const MAX_NAV_TAGS: usize = 32;
 
 /// Why a room file could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -360,9 +481,50 @@ impl Room {
             width,
             height,
             world: WorldRules::default(),
+            nav_tags: Vec::new(),
+            nav_paint: Vec::new(),
             objects: Vec::new(),
             placed: Vec::new(),
         }
+    }
+
+    /// Declare a nav tag (if new) and return its bit. `None` if the room is
+    /// already at [`MAX_NAV_TAGS`].
+    pub fn declare_tag(&mut self, name: impl Into<String>) -> Option<u32> {
+        let name = name.into();
+        if let Some(bit) = self.tag_bit(&name) {
+            return Some(bit);
+        }
+        if self.nav_tags.len() >= MAX_NAV_TAGS {
+            return None;
+        }
+        self.nav_tags.push(name);
+        Some(1 << (self.nav_tags.len() - 1))
+    }
+
+    /// The bit for a declared tag name.
+    pub fn tag_bit(&self, name: &str) -> Option<u32> {
+        self.nav_tags
+            .iter()
+            .position(|t| t == name)
+            .filter(|&i| i < MAX_NAV_TAGS)
+            .map(|i| 1u32 << i)
+    }
+
+    /// The bits for a list of tag names. Names the room does not declare are
+    /// ignored (the validator reports them as errors).
+    pub fn tag_mask(&self, names: &[String]) -> u32 {
+        names
+            .iter()
+            .filter_map(|n| self.tag_bit(n))
+            .fold(0, |acc, b| acc | b)
+    }
+
+    /// Mark a tile with a nav tag, declaring the tag if needed.
+    pub fn paint_tag(&mut self, tag: impl Into<String>, x: i32, y: i32) {
+        let tag = tag.into();
+        self.declare_tag(tag.clone());
+        self.nav_paint.push(NavPaint { x, y, tag });
     }
 
     pub fn find_object(&self, name: &str) -> Option<&ObjectDef> {

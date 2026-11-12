@@ -33,6 +33,7 @@
 
 mod actions;
 mod gui;
+mod navtools;
 mod rooms;
 
 use std::collections::VecDeque;
@@ -244,6 +245,7 @@ impl Plugin for EnginePlugin {
             .init_resource::<EngineStatus>()
             .init_resource::<Actions>()
             .init_resource::<Selection>()
+            .init_resource::<navtools::NavTools>()
             .init_resource::<gui::FrameHistory>()
             .add_systems(Startup, (spawn_cameras, rooms::load_initial_room))
             .add_systems(

@@ -82,15 +82,24 @@ impl Scheduler {
         self.scheduled += 1;
     }
 
-    /// Call `f(id, ob_tick)` for every object due on `tick`. `ob_tick` is how
+    /// Call `f(id, elapsed)` for every object due on `tick`. `elapsed` is how
     /// many ticks have passed since that object's last update, so its logic
-    /// can do that much work in one go.
+    /// can do that much work in one go. An object's first update counts from
+    /// tick 0, so it gets `tick + 1`, not the full interval; from then on it is
+    /// the interval. Over any run, the elapsed values add up to the ticks run.
     #[inline]
     pub fn due(&self, tick: u64, mut f: impl FnMut(u32, u32)) {
         for lane in &self.lanes {
             let phase = (tick % u64::from(lane.every)) as usize;
+            // First time round (tick below the interval) the object has only
+            // existed for `tick + 1` ticks.
+            let elapsed = if tick < u64::from(lane.every) {
+                tick as u32 + 1
+            } else {
+                lane.every
+            };
             for &id in &lane.buckets[phase] {
-                f(id, lane.every);
+                f(id, elapsed);
             }
         }
     }
@@ -176,6 +185,29 @@ mod tests {
     }
 
     #[test]
+    fn elapsed_ticks_add_up_to_exactly_the_ticks_that_ran() {
+        // Logic that does "elapsed ticks of work" per update must have done
+        // exactly one tick of work per tick, from the very first update on.
+        let mut s = Scheduler::new();
+        for id in 0..10 {
+            s.insert(id, 4);
+        }
+        s.insert(10, 1);
+        s.insert(11, 60);
+        let mut work = [0u64; 12];
+        let mut last = [0u64; 12];
+        for t in 0..240 {
+            s.due(t, |id, elapsed| {
+                work[id as usize] += u64::from(elapsed);
+                last[id as usize] = t;
+            });
+        }
+        for id in 0..12 {
+            assert_eq!(work[id], last[id] + 1, "object {id}");
+        }
+    }
+
+    #[test]
     fn same_rate_objects_are_spread_evenly_across_ticks() {
         let mut s = Scheduler::new();
         for id in 0..1000 {
@@ -216,11 +248,15 @@ mod tests {
         let mut s = Scheduler::new();
         s.insert(1, u32::MAX);
         let mut seen = 0;
-        s.due(0, |_, every| {
-            assert_eq!(every, MAX_OB_TICK);
+        s.due(0, |_, elapsed| {
+            assert_eq!(elapsed, 1, "first update: one tick has existed");
             seen += 1;
         });
-        assert_eq!(seen, 1);
+        s.due(u64::from(MAX_OB_TICK), |_, elapsed| {
+            assert_eq!(elapsed, MAX_OB_TICK, "clamped to the cap, not 4 billion");
+            seen += 1;
+        });
+        assert_eq!(seen, 2);
     }
 
     #[test]

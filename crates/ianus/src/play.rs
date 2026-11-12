@@ -18,6 +18,7 @@ use ianus_sim::Body;
 
 use crate::body::{PrevPos, SimBody};
 use crate::input::MoveIntent;
+use crate::nav::reset_agents;
 use crate::tick::{ReplayMode, SimControl, SimRng, Tick, TickInput};
 
 /// Whether the world is being edited or the game is running.
@@ -56,6 +57,8 @@ pub fn play(world: &mut World) -> bool {
     let rng = *world.resource::<SimRng>();
     world.insert_resource(PlaySnapshot { bodies, tick, rng });
 
+    // Agents plan from scratch, so a run never depends on an earlier one.
+    reset_agents(world);
     // Start playing with no leftover key state from the editor.
     world.insert_resource(MoveIntent::default());
     world.insert_resource(TickInput::default());
@@ -91,6 +94,7 @@ pub fn stop(world: &mut World) -> bool {
         }
     }
 
+    reset_agents(world);
     world.insert_resource(snapshot.tick);
     world.insert_resource(snapshot.rng);
     world.insert_resource(ReplayMode::Off);

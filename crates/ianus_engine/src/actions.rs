@@ -30,6 +30,13 @@ pub enum Action {
     /// Put the world back to its starting state and tick 0.
     Restart,
     ToggleGui,
+    /// Paint or unpaint nav tags on one tile of the loaded room. Only while
+    /// editing, since Stop does not undo it.
+    PaintNavTile {
+        x: i32,
+        y: i32,
+        op: PaintOp,
+    },
 }
 
 /// Actions waiting to be carried out at the next opportunity.
@@ -88,6 +95,17 @@ pub(crate) fn apply_actions(world: &mut World) {
             }
             Action::Step => step_once(world),
             Action::SetSpeed(speed) => world.resource_mut::<SimControl>().speed = speed,
+            Action::PaintNavTile { x, y, op } => {
+                if *world.resource::<PlayMode>() != PlayMode::Editing {
+                    world
+                        .resource_mut::<EngineStatus>()
+                        .say("painting nav tags works while editing: press Stop first");
+                } else if let Err(e) = paint_nav_tile(world, x, y, op) {
+                    world
+                        .resource_mut::<EngineStatus>()
+                        .say(format!("cannot paint: {e}"));
+                }
+            }
             Action::ToggleGui => {
                 let mut v = world.resource_mut::<GuiVisible>();
                 v.0 = !v.0;
@@ -101,11 +119,18 @@ pub(crate) fn apply_actions(world: &mut World) {
                 world.resource_mut::<EngineStatus>().say(message);
             }
             Action::Restart => {
+                let recording = matches!(*world.resource::<ReplayMode>(), ReplayMode::Recording(_));
                 let message = match restart_world(world) {
                     Ok(()) => {
                         world.insert_resource(Tick(0));
+                        // Same start as loading a room: tick 0, seed 0.
+                        world.insert_resource(SimRng::default());
                         world.insert_resource(ReplayMode::Off);
-                        "world restarted".to_string()
+                        if recording {
+                            "world restarted (the recording in progress was discarded)".to_string()
+                        } else {
+                            "world restarted".to_string()
+                        }
                     }
                     Err(e) => format!("restart hook failed: {e}"),
                 };
@@ -168,5 +193,90 @@ mod tests {
         a.push(Action::Step);
         a.push(Action::SetSpeed(2.0));
         assert_eq!(a.0, vec![Action::Step, Action::SetSpeed(2.0)]);
+    }
+
+    use bevy::app::App;
+    use bevy::time::TimePlugin;
+
+    /// An app with a small room loaded (in edit mode), and the action queue.
+    fn app_with_room() -> App {
+        let mut room = Room::new("Paint", 8, 6);
+        room.declare_tag("water");
+        room.define(ObjectDef::with_kind(
+            "Player",
+            Kind::Entity {
+                controlled: true,
+                speed_tiles_per_s: 5,
+            },
+        ));
+        room.place("Player", 1, 1);
+        let mut app = App::new();
+        app.add_plugins((TimePlugin, IanusPlugin));
+        app.init_resource::<EngineStatus>()
+            .init_resource::<Actions>();
+        load_room(app.world_mut(), room).expect("valid room");
+        app
+    }
+
+    fn last_message(app: &App) -> String {
+        app.world()
+            .resource::<EngineStatus>()
+            .lines()
+            .last()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn paint(app: &mut App, x: i32, y: i32, op: PaintOp) {
+        app.world_mut()
+            .resource_mut::<Actions>()
+            .push(Action::PaintNavTile { x, y, op });
+        apply_actions(app.world_mut());
+    }
+
+    #[test]
+    fn painting_from_the_editor_changes_the_loaded_room_and_the_nav_map() {
+        let mut app = app_with_room();
+        assert_eq!(*app.world().resource::<PlayMode>(), PlayMode::Editing);
+        paint(&mut app, 3, 2, PaintOp::Add("water".into()));
+        assert_eq!(app.world().resource::<NavMap>().grid.tags(3, 2), 1);
+        assert_eq!(app.world().resource::<CurrentRoom>().0.nav_paint.len(), 1);
+        paint(&mut app, 3, 2, PaintOp::Clear);
+        assert_eq!(app.world().resource::<NavMap>().grid.tags(3, 2), 0);
+    }
+
+    #[test]
+    fn painting_while_playing_is_refused_with_an_explanation() {
+        let mut app = app_with_room();
+        assert!(play(app.world_mut()));
+        paint(&mut app, 3, 2, PaintOp::Add("water".into()));
+        assert_eq!(
+            app.world().resource::<NavMap>().grid.tags(3, 2),
+            0,
+            "nothing was painted"
+        );
+        assert!(
+            last_message(&app).contains("Stop"),
+            "{}",
+            last_message(&app)
+        );
+    }
+
+    #[test]
+    fn a_bad_paint_request_says_why_and_changes_nothing() {
+        let mut app = app_with_room();
+        paint(&mut app, 50, 2, PaintOp::Add("water".into()));
+        assert!(
+            last_message(&app).contains("outside the room"),
+            "{}",
+            last_message(&app)
+        );
+        paint(&mut app, 2, 2, PaintOp::Add("lava".into()));
+        assert!(
+            last_message(&app).contains("lava"),
+            "{}",
+            last_message(&app)
+        );
+        assert!(app.world().resource::<CurrentRoom>().0.nav_paint.is_empty());
     }
 }
