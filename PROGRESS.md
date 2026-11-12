@@ -79,7 +79,7 @@
 
 ## Engine / GUI state
 
-- egui layout: toolbar (Play/Stop, Pause, Step, speed, Record, Replay, Restart), Scene list grouped by category (Wall/Environment folded), Inspector (position edit, category/options read-only), Simulation panel (tick, messages, frame graph). Click-to-select. Camera frames the room while editing and follows the player while playing. Rooms hot-reload on save (wait for Stop if playing).
+- egui layout: toolbar (Play/Stop, Pause, Step, speed, Record, Replay, Restart), Scene list grouped by category (Wall/Environment folded), Inspector (position edit, category/options read-only), Simulation panel (tick, messages, frame graph). Click-to-select. Camera frames the room while editing and follows the player while playing. Rooms hot-reload on save (wait for Stop if playing). Inspector now scrolls (written, never seen on screen). **Code window** (toolbar `Code`): floating egui window to open/new/edit/save `scripts/*.rs` with simple Rust colouring and Ctrl+S; editor only, nothing compiles or runs the scripts. egui now absorbs Bevy keyboard/mouse input while typing in it. Helper functions have 4 passing tests (verified); the window itself has never been opened (unverified).
 - Shortcuts: F5 Play/Stop, F1 pause, F2 step, F3 speed, F4 hide panels, F6 replay, F7 record, F8 reload.
 - **Seen working on screen once** (room rendered with correct colours per category, panels, 138 fps). **Not seen:** edit-mode camera framing, grouped Scene list, anything since.
 - **OPEN BUG: intermittent blank/black game view.** Several early runs showed correct panels but a blank game view; a later run was fine. Unconfirmed theory: the screenshot was taken before render pipelines finished compiling (screenshot at frame ~60 vs 200). Not proven.

@@ -32,6 +32,7 @@
 //! [`ianus::IanusAppExt::set_restart_hook`].
 
 mod actions;
+mod code_editor;
 mod gui;
 mod navtools;
 mod rooms;
@@ -246,6 +247,12 @@ impl Plugin for EnginePlugin {
             .init_resource::<Actions>()
             .init_resource::<Selection>()
             .init_resource::<navtools::NavTools>()
+            .init_resource::<code_editor::CodeEditor>()
+            // Typing in the code editor must not drive the player or trigger F-keys.
+            .insert_resource(bevy_egui::EguiGlobalSettings {
+                enable_absorb_bevy_input_system: true,
+                ..Default::default()
+            })
             .init_resource::<gui::FrameHistory>()
             .add_systems(Startup, (spawn_cameras, rooms::load_initial_room))
             .add_systems(
