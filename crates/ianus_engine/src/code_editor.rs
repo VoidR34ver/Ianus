@@ -51,26 +51,36 @@ impl Doc {
     }
 }
 
-/// State of the code editor window.
+/// State of the code editor: a Resources window (like GameMaker's resource
+/// tree) and one floating code window per open script.
 #[derive(Resource, Debug, Default)]
 pub struct CodeEditor {
+    /// The Resources window.
     pub open: bool,
     docs: Vec<Doc>,
-    active: usize,
     new_name: String,
-    /// Last problem or result, shown under the text.
+    /// Last problem or result, shown in the Resources window.
     message: String,
 }
 
 impl CodeEditor {
+    /// Window starts open and opens the file named by `IANUS_OPEN_CODE` (for automated screenshots).
+    pub fn from_env() -> Self {
+        let mut me = Self::default();
+        if let Ok(file) = std::env::var("IANUS_OPEN_CODE") {
+            me.open = true;
+            me.open_file(Path::new(&file));
+        }
+        me
+    }
+
     pub fn toggle(&mut self) {
         self.open = !self.open;
     }
 
-    /// Open a file (or switch to it if it is already open).
+    /// Open a file in its own window (nothing happens if it is already open).
     pub fn open_file(&mut self, path: &Path) {
-        if let Some(i) = self.docs.iter().position(|d| d.path == path) {
-            self.active = i;
+        if self.docs.iter().any(|d| d.path == path) {
             return;
         }
         match fs::read_to_string(path) {
@@ -80,7 +90,6 @@ impl CodeEditor {
                     saved: text.clone(),
                     text,
                 });
-                self.active = self.docs.len() - 1;
                 self.message.clear();
             }
             Err(e) => self.message = format!("Could not open {}: {e}", path.display()),
@@ -105,55 +114,49 @@ impl CodeEditor {
         self.open_file(&path);
     }
 
-    fn save_active(&mut self) {
-        let Some(doc) = self.docs.get_mut(self.active) else {
-            return;
-        };
-        match fs::write(&doc.path, &doc.text) {
-            Ok(()) => {
-                doc.saved = doc.text.clone();
-                self.message = format!("Saved {}", doc.path.display());
-            }
-            Err(e) => self.message = format!("Could not save {}: {e}", doc.path.display()),
-        }
-    }
-
-    fn close_active(&mut self) {
-        if self.active < self.docs.len() {
-            self.docs.remove(self.active);
-            self.active = self.active.saturating_sub(1);
-        }
-    }
-
-    /// Draw the window. Call every frame from the GUI system.
+    /// Draw the windows. Call every frame from the GUI system.
     pub fn show(&mut self, ctx: &egui::Context) {
-        if !self.open {
-            return;
+        if self.open {
+            let mut open = true;
+            egui::Window::new("Resources")
+                .open(&mut open)
+                .default_size([200.0, 300.0])
+                .default_pos([240.0, 60.0])
+                .show(ctx, |ui| self.resources(ui));
+            self.open = open;
         }
-        let mut open = self.open;
-        egui::Window::new("Code")
-            .open(&mut open)
-            .default_size([560.0, 420.0])
-            .resizable(true)
-            .collapsible(true)
-            .show(ctx, |ui| self.contents(ui));
-        self.open = open;
+
+        let mut closed = None;
+        let mut message = None;
+        for (i, doc) in self.docs.iter_mut().enumerate() {
+            let mut open = true;
+            egui::Window::new(doc.title())
+                .id(egui::Id::new(("code_doc", &doc.path)))
+                .open(&mut open)
+                .default_size([520.0, 400.0])
+                .default_pos([460.0 + 24.0 * i as f32, 90.0 + 24.0 * i as f32])
+                .show(ctx, |ui| {
+                    if let Some(m) = doc.contents(ui) {
+                        message = Some(m);
+                    }
+                });
+            if !open {
+                closed = Some(i);
+            }
+        }
+        if let Some(i) = closed {
+            self.docs.remove(i);
+        }
+        if let Some(m) = message {
+            self.message = m;
+        }
     }
 
-    fn contents(&mut self, ui: &mut egui::Ui) {
-        // Ctrl+S saves while the editor has focus.
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-            self.save_active();
-        }
-
-        ui.horizontal_wrapped(|ui| {
-            for i in 0..self.docs.len() {
-                let title = self.docs[i].title();
-                if ui.selectable_label(self.active == i, title).clicked() {
-                    self.active = i;
-                }
-            }
-            ui.menu_button("Open...", |ui| {
+    /// The resource tree: a Scripts folder; double-click opens a script.
+    fn resources(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Scripts")
+            .default_open(true)
+            .show(ui, |ui| {
                 let files = list_scripts();
                 if files.is_empty() {
                     ui.weak(format!("No files in {SCRIPTS_DIR}/ yet."));
@@ -162,75 +165,77 @@ impl CodeEditor {
                     let name = path
                         .file_name()
                         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                    if ui.button(name).clicked() {
+                    if ui
+                        .selectable_label(false, name)
+                        .on_hover_text("Double-click to open")
+                        .double_clicked()
+                    {
                         self.open_file(&path);
-                        ui.close();
                     }
                 }
             });
-            ui.menu_button("New...", |ui| {
-                ui.label("File name (.rs is added)");
-                let r = ui.text_edit_singleline(&mut self.new_name);
-                let go = ui.button("Create").clicked()
-                    || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                if go && !self.new_name.is_empty() {
-                    let name = std::mem::take(&mut self.new_name);
-                    self.create(&name);
-                    ui.close();
-                }
-            });
-        });
+        ui.separator();
+        ui.label("New script (.rs is added)");
+        let r = ui.text_edit_singleline(&mut self.new_name);
+        let go = ui.button("Create").clicked()
+            || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+        if go && !self.new_name.is_empty() {
+            let name = std::mem::take(&mut self.new_name);
+            self.create(&name);
+        }
+        if !self.message.is_empty() {
+            ui.weak(&self.message);
+        }
+    }
+}
+
+impl Doc {
+    fn save(&mut self) -> String {
+        match fs::write(&self.path, &self.text) {
+            Ok(()) => {
+                self.saved = self.text.clone();
+                format!("Saved {}", self.path.display())
+            }
+            Err(e) => format!("Could not save {}: {e}", self.path.display()),
+        }
+    }
+
+    /// Draw one script window; returns a message when something happened.
+    fn contents(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        let mut message = None;
         ui.horizontal(|ui| {
-            let has_doc = self.active < self.docs.len();
-            if ui
-                .add_enabled(has_doc, egui::Button::new("Save  (Ctrl+S)"))
-                .clicked()
-            {
-                self.save_active();
+            if ui.button("Save  (Ctrl+S)").clicked() {
+                message = Some(self.save());
             }
-            if ui
-                .add_enabled(has_doc, egui::Button::new("Close"))
-                .clicked()
-            {
-                self.close_active();
-            }
-            if let Some(doc) = self.docs.get(self.active) {
-                ui.weak(doc.path.display().to_string());
-            }
+            ui.weak(self.path.display().to_string());
         });
         ui.separator();
-
-        let message = self.message.clone();
-        let Some(doc) = self.docs.get_mut(self.active) else {
-            ui.weak("No file open. Use Open... or New... above.");
-            return;
-        };
 
         let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
             let mut job = highlight_rust(text.as_str(), ui.visuals().dark_mode);
             job.wrap.max_width = wrap_width;
             ui.fonts_mut(|f| f.layout_job(job))
         };
-
-        // Leave a line for the message under the text.
-        let height = (ui.available_height() - 24.0).max(60.0);
         egui::ScrollArea::both()
             .id_salt("code_scroll")
-            .max_height(height)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut doc.text)
+                let r = ui.add(
+                    egui::TextEdit::multiline(&mut self.text)
                         .font(egui::TextStyle::Monospace)
                         .code_editor()
                         .desired_width(f32::INFINITY)
                         .desired_rows(20)
                         .layouter(&mut layouter),
                 );
+                // Ctrl+S saves the script you are typing in.
+                if r.has_focus()
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S))
+                {
+                    message = Some(self.save());
+                }
             });
-        if !message.is_empty() {
-            ui.weak(message);
-        }
+        message
     }
 }
 
