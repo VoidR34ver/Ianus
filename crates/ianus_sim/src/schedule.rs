@@ -176,6 +176,29 @@ mod tests {
     }
 
     #[test]
+    fn elapsed_ticks_add_up_to_exactly_the_ticks_that_ran() {
+        // Logic that does "elapsed ticks of work" per update must have done
+        // exactly one tick of work per tick, from the very first update on.
+        let mut s = Scheduler::new();
+        for id in 0..10 {
+            s.insert(id, 4);
+        }
+        s.insert(10, 1);
+        s.insert(11, 60);
+        let mut work = [0u64; 12];
+        let mut last = [0u64; 12];
+        for t in 0..240 {
+            s.due(t, |id, elapsed| {
+                work[id as usize] += u64::from(elapsed);
+                last[id as usize] = t;
+            });
+        }
+        for id in 0..12 {
+            assert_eq!(work[id], last[id] + 1, "object {id}");
+        }
+    }
+
+    #[test]
     fn same_rate_objects_are_spread_evenly_across_ticks() {
         let mut s = Scheduler::new();
         for id in 0..1000 {

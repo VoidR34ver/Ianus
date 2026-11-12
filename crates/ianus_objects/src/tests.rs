@@ -466,3 +466,42 @@ fn tick_rate_mistakes_are_explained() {
             .any(|s| s.contains("ob_tick_scale is 0"))
     );
 }
+
+#[test]
+fn a_light_with_two_pointless_options_gets_both_warnings() {
+    let mut r = good_room();
+    r.objects.retain(|o| o.name != "Torch");
+    r.define(ObjectDef::with_kind(
+        "Torch",
+        Kind::Light {
+            radius_tiles: 0,
+            color: [255, 255, 255],
+            intensity_percent: 150,
+        },
+    ));
+    let m = messages(&r);
+    assert!(m.iter().any(|s| s.contains("radius 0")), "{m:?}");
+    assert!(m.iter().any(|s| s.contains("intensity 150%")), "{m:?}");
+}
+
+#[test]
+fn a_level_scale_that_pushes_ob_tick_past_the_limit_is_a_warning() {
+    let mut r = good_room();
+    let mut slow = ObjectDef::new("Slow", Category::Interactable);
+    slow.ob_tick = 600;
+    r.define(slow);
+    r.world.ob_tick_scale = 1000;
+    let m = messages(&r);
+    assert!(
+        m.iter().any(|s| s.contains("'Slow'") && s.contains("ob_tick_scale")),
+        "{m:?}"
+    );
+}
+
+#[test]
+fn a_zero_size_hitbox_on_something_that_moves_says_it_ignores_walls() {
+    let mut r = good_room();
+    r.objects[0].hitbox = Hitbox::square(0);
+    let m = messages(&r);
+    assert!(m.iter().any(|s| s.contains("walk through walls")), "{m:?}");
+}

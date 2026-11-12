@@ -459,6 +459,35 @@ mod tests {
     }
 
     #[test]
+    fn a_tiny_body_cannot_jump_over_a_thin_solid() {
+        // Both are narrower than one tick of movement at top speed, so a
+        // check of only the end position would miss the wall at some
+        // alignments. Try every alignment.
+        let fp = Footprint {
+            half_x: 81,
+            half_y: 81,
+            offset_x: 0,
+            offset_y: 0,
+        };
+        for off in 0..crate::MAX_SPEED {
+            let mut s = Solids::new(40, 5);
+            let wall = 20 * T + off;
+            s.set_boxes([Aabb::new(wall, 0, wall + 162, 3 * T)]);
+            let mut b = at_tile(2, 2);
+            for _ in 0..400 {
+                step_body_solid(&mut b, MoveInput::RIGHT, &s, &fp);
+            }
+            assert_eq!(b.pos.x + fp.half_x, wall, "offset {off}: not flush");
+
+            let mut b = at_tile(30, 2);
+            for _ in 0..400 {
+                step_body_solid(&mut b, MoveInput::LEFT, &s, &fp);
+            }
+            assert_eq!(b.pos.x - fp.half_x, wall + 162, "offset {off}: not flush");
+        }
+    }
+
+    #[test]
     fn no_wall_is_ever_skipped_even_at_top_speed() {
         let mut g = SolidGrid::new(9, 9);
         g.set(4, 4, true);
