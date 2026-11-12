@@ -506,3 +506,201 @@ fn a_zero_size_hitbox_on_something_that_moves_says_it_ignores_walls() {
     let m = messages(&r);
     assert!(m.iter().any(|s| s.contains("walk through walls")), "{m:?}");
 }
+
+// ---- Nav tags and agents ----
+
+fn chaser() -> ObjectDef {
+    let mut d = ObjectDef::with_kind(
+        "Hunter",
+        Kind::Entity {
+            controlled: false,
+            speed_tiles_per_s: 4,
+        },
+    );
+    d.agent = Some(AgentDef {
+        target: AgentTarget::Controlled,
+        allow: vec![],
+        avoid: vec!["water".into()],
+        stop_distance: 150,
+    });
+    d
+}
+
+fn room_with_hunter() -> Room {
+    let mut r = good_room();
+    r.declare_tag("water");
+    r.declare_tag("road");
+    r.define(chaser());
+    r.place("Hunter", 6, 6);
+    r
+}
+
+#[test]
+fn a_room_with_tags_painting_and_an_agent_round_trips_through_text() {
+    let mut r = room_with_hunter();
+    r.paint_tag("water", 4, 4);
+    r.paint_tag("road", 5, 4);
+    let mut mud = ObjectDef::with_kind(
+        "Puddle",
+        Kind::Environment {
+            walkable: true,
+            speed_percent: 100,
+        },
+    );
+    mud.nav_tags = vec!["water".into()];
+    r.define(mud);
+    r.place("Puddle", 3, 5);
+    assert_eq!(r.validate(), vec![], "{:?}", messages(&r));
+    let text = r.to_text();
+    assert_eq!(Room::from_text(&text).unwrap(), r);
+    assert!(text.contains("Hunter") && text.contains("water"));
+}
+
+#[test]
+fn rooms_without_nav_fields_load_and_save_unchanged() {
+    // The field names are new; a room that never mentions them must not
+    // start printing them, or every saved room would change.
+    let text = good_room().to_text();
+    assert!(!text.contains("nav_tags") && !text.contains("nav_paint") && !text.contains("agent"));
+    let back = Room::from_text(&text).unwrap();
+    assert!(back.nav_tags.is_empty() && back.nav_paint.is_empty());
+    assert!(
+        back.objects
+            .iter()
+            .all(|o| o.agent.is_none() && o.nav_tags.is_empty())
+    );
+}
+
+#[test]
+fn tag_bits_follow_declaration_order_and_are_capped() {
+    let mut r = Room::new("T", 3, 3);
+    assert_eq!(r.declare_tag("a"), Some(1));
+    assert_eq!(r.declare_tag("b"), Some(2));
+    assert_eq!(
+        r.declare_tag("a"),
+        Some(1),
+        "declaring twice is the same tag"
+    );
+    assert_eq!(r.tag_mask(&["b".into(), "a".into(), "nope".into()]), 3);
+    for i in 2..MAX_NAV_TAGS {
+        assert!(r.declare_tag(format!("t{i}")).is_some());
+    }
+    assert_eq!(r.declare_tag("one too many"), None);
+}
+
+#[test]
+fn unknown_tags_are_errors_with_a_suggestion() {
+    let mut r = room_with_hunter();
+    r.nav_paint.push(NavPaint {
+        x: 1,
+        y: 1,
+        tag: "watr".into(),
+    });
+    r.objects
+        .iter_mut()
+        .find(|o| o.name == "Hunter")
+        .unwrap()
+        .agent
+        .as_mut()
+        .unwrap()
+        .allow = vec!["rod".into()];
+    let m = messages(&r);
+    assert!(
+        m.iter()
+            .any(|s| s.contains("tile (1, 1)") && s.contains("Did you mean 'water'")),
+        "{m:?}"
+    );
+    assert!(
+        m.iter()
+            .any(|s| s.contains("agent 'Hunter'") && s.contains("Did you mean 'road'")),
+        "{m:?}"
+    );
+    assert!(!r.is_playable());
+}
+
+#[test]
+fn bad_paint_positions_and_duplicate_tags_are_errors() {
+    let mut r = room_with_hunter();
+    r.paint_tag("water", 40, 2);
+    r.nav_tags.push("water".into());
+    let m = messages(&r);
+    assert!(
+        m.iter().any(|s| s.contains("outside the 10x8 room")),
+        "{m:?}"
+    );
+    assert!(
+        m.iter().any(|s| s.contains("declared more than once")),
+        "{m:?}"
+    );
+}
+
+#[test]
+fn agents_on_the_wrong_kind_of_object_are_errors() {
+    let mut r = room_with_hunter();
+    r.objects
+        .iter_mut()
+        .find(|o| o.name == "Player")
+        .unwrap()
+        .agent = Some(AgentDef::default());
+    r.objects
+        .iter_mut()
+        .find(|o| o.name == "Wall")
+        .unwrap()
+        .agent = Some(AgentDef::default());
+    let m = messages(&r);
+    assert!(
+        m.iter()
+            .any(|s| s.contains("'Player'") && s.contains("would fight")),
+        "{m:?}"
+    );
+    assert!(
+        m.iter()
+            .any(|s| s.contains("'Wall'") && s.contains("not an Entity")),
+        "{m:?}"
+    );
+}
+
+#[test]
+fn risky_agent_settings_are_warnings() {
+    let mut r = room_with_hunter();
+    {
+        let h = r.objects.iter_mut().find(|o| o.name == "Hunter").unwrap();
+        h.collision = false;
+        h.solid = true;
+        h.hitbox = Hitbox::square(100);
+        h.ob_tick = 0;
+        let a = h.agent.as_mut().unwrap();
+        a.allow = vec!["water".into()];
+        a.target = AgentTarget::Named("Cratee".into());
+    }
+    r.define(ObjectDef::with_kind(
+        "Crate",
+        Kind::Entity {
+            controlled: false,
+            speed_tiles_per_s: 1,
+        },
+    ));
+    let m = messages(&r);
+    for needle in [
+        "both allows and avoids the tag 'water'",
+        "collision off",
+        "is solid",
+        "hitbox of 100x100",
+        "ob_tick 0",
+        "Did you mean 'Crate'",
+    ] {
+        assert!(
+            m.iter().any(|s| s.contains(needle)),
+            "missing {needle:?} in {m:?}"
+        );
+    }
+    assert!(r.is_playable(), "all of these are warnings, not errors");
+}
+
+#[test]
+fn an_agent_with_nothing_to_chase_is_a_warning() {
+    let mut r = room_with_hunter();
+    r.placed.retain(|p| p.object != "Player");
+    let m = messages(&r);
+    assert!(m.iter().any(|s| s.contains("none is placed")), "{m:?}");
+}
